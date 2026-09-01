@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+
+runs/
+tmp/
+
+*.pt
+*.onnx
+*.engine
+
+datasets/raw/
+datasets/processed/
+
+output/pdf/*.png
