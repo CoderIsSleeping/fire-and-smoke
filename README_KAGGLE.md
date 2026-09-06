@@ -1,145 +1,161 @@
-# Kaggle Workflow for M1 Fire/Smoke Detection
+# Kaggle Workflow — DINOv3 Fire & Smoke Detector
 
-Use this workflow when training on Kaggle and keeping GitHub as code-only storage.
+GitHub holds the code, Kaggle holds the data and the GPU.
 
-## What Goes to GitHub
+---
 
-Push the code repository only:
+## 1. What goes where
+
+**GitHub (code only):**
 
 ```text
-scripts/
-requirements.txt
-README_TRAINING.md
-README_KAGGLE.md
-.gitignore
+scripts/            requirements_dinov3.txt
+PROJECT_LOG.md      README_TRAINING.md      README_KAGGLE.md      .gitignore
 ```
 
-Do not push:
+**Kaggle inputs (never in git):**
 
 ```text
-.venv/
-datasets/
-runs/
-*.pt
-*.onnx
-*.engine
-```
-
-These are already ignored by `.gitignore`.
-
-## What Goes to Kaggle Input
-
-Upload the processed YOLO dataset as a Kaggle dataset/input:
-
-```text
-datasets/processed/fire_smoke_yolo/
+<your-dataset>/          the prepared detection dataset
   data.yaml
-  images/
-    train/
-    val/
-    test/
-  labels/
-    train/
-    val/
-    test/
+  images/{train,val,test}/
+  labels/{train,val,test}/
+
+<your-video-dataset>/    verification footage, kept out of every split
 ```
 
-Also upload your external verification video as a separate Kaggle input. Do not include that video in training, validation, or test folders.
+`.gitignore` already excludes `datasets/`, `runs/`, `.venv/` and `*.pt`.
 
-## Kaggle Notebook Setup
+> The `path:` line inside `data.yaml` is a Windows path from the machine that
+> prepared the dataset. Leave it — the loader ignores it when it does not exist
+> and falls back to the yaml's own folder.
 
-In Kaggle:
+## 2. Notebook setup
 
-1. Create a new notebook.
-2. Enable GPU: Notebook settings -> Accelerator -> GPU.
-3. Add your processed dataset as input.
-4. Add your external verification video as another input.
-5. Clone your GitHub repository.
+Notebook settings → Accelerator → **GPU (T4 x2 or P100)**, and add both inputs.
 
-Example notebook cells:
-
-```bash
+```python
 !git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
 %cd YOUR_REPO
+!pip install -q "timm>=1.0.20" huggingface_hub
 ```
 
-Install dependencies:
+Check what Kaggle actually mounted, and that the environment is sound:
 
-```bash
-!pip install -q ultralytics opencv-python pyyaml numpy matplotlib pandas tqdm
+```python
+!python scripts/list_kaggle_inputs.py
+!python scripts/check_training_readiness.py --check-backbone
 ```
 
-Confirm Kaggle can see a GPU:
+`--check-backbone` downloads the DINOv3 trunk (~86 MB). If the notebook has no
+internet, this is where you find out — see *Offline weights* at the bottom.
 
-```bash
-!python - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("cuda:", torch.cuda.is_available())
-print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")
-PY
+## 3. Train
+
+The scripts find `data.yaml` under `/kaggle/input` on their own.
+
+```python
+!python scripts/train_dinov3_detector.py \
+    --epochs 40 --imgsz 640 --batch 8 --workers 2 \
+    --name dinov3_stage1 --zip
 ```
 
-## Train on Kaggle
+Fast sanity run first (about two minutes) — always worth it before spending a
+GPU quota:
 
-The script auto-finds `data.yaml` under `/kaggle/input`.
-
-```bash
-!python scripts/kaggle_train_yolo.py --epochs 80 --imgsz 960 --batch -1 --device 0
+```python
+!python scripts/train_dinov3_detector.py \
+    --epochs 1 --imgsz 640 --batch 8 \
+    --max-train-images 200 --max-val-images 200 --name smoketest
 ```
 
-If you want a faster first trial:
+Outputs land in `/kaggle/working/fire_smoke/<name>/`, and `--zip` also writes
+`/kaggle/working/fire_smoke/<name>_results.zip` for downloading.
 
-```bash
-!python scripts/kaggle_train_yolo.py --epochs 10 --imgsz 640 --batch -1 --device 0 --name smoke_test_dfire_yolov8n
+**If the session times out**, save the run as a Kaggle dataset and resume:
+
+```python
+!python scripts/train_dinov3_detector.py --epochs 40 --imgsz 640 --batch 8 \
+    --name dinov3_stage1 --resume /kaggle/input/PREVIOUS_RUN/weights/last.pt
 ```
 
-Training outputs are saved in:
+### Memory guide
+
+| GPU | imgsz | batch |
+|---|---|---|
+| T4 (16 GB) | 640 | 8 |
+| T4 (16 GB) | 704 | 6 |
+| P100 (16 GB) | 640 | 8 |
+
+If you hit OOM, halve `--batch` and set `--accum 2` to keep the effective batch.
+
+## 4. Evaluate on the test split
+
+```python
+!python scripts/eval_dinov3_detector.py \
+    --weights /kaggle/working/fire_smoke/dinov3_stage1/weights/best.pt \
+    --split test --target-fpr 0.01
+```
+
+Record two things in `PROJECT_LOG.md` §9:
+- **mAP@0.5** and per-class AP — the benchmark numbers for the report,
+- the **recommended confidence threshold** and the false-alarm rate at it — the
+  deployment number.
+
+Then open `eval_test/false_positives/` and look at what the model actually got
+wrong. Those images are the most useful output of the whole run: they tell you
+what to collect for the fine-tuning stage.
+
+## 5. Verify on the external video
+
+```python
+!python scripts/predict_video_dinov3.py \
+    --weights /kaggle/working/fire_smoke/dinov3_stage1/weights/best.pt \
+    --source /kaggle/input/YOUR_VIDEO_DATASET/YOUR_VIDEO.mp4 \
+    --output /kaggle/working/verification.mp4 \
+    --conf 0.5 --window 15 --enter-hits 6
+```
+
+Use the threshold that step 4 recommended. You get `verification.mp4` plus
+`verification.events.csv`, one row per alarm state change.
+
+If the video is long, `--stride 3` runs the model on every third frame while
+still writing every frame to the output. Remember the confirmation window is
+counted in *processed* frames, so at `--stride 3` a `--window 15` covers 45
+source frames.
+
+## 6. Reporting note
+
+The external video is not part of train, val or test. Describe it as:
 
 ```text
-/kaggle/working/runs/fire_smoke/
+External unseen verification footage, used for qualitative demonstration only.
 ```
 
-The best model should be:
+Benchmark numbers come from the **D-Fire test split**. Two numbers belong
+together in the report, and they should be quoted as a pair:
 
 ```text
-/kaggle/working/runs/fire_smoke/dfire_yolov8n_base/weights/best.pt
+mAP@0.5 = <x> at confidence <t>, with a false-alarm rate of <f> on the
+2,005 verified-negative test images.
 ```
 
-The training script also zips the run folder:
+An mAP quoted without its false-alarm rate says nothing about whether the
+system can be left switched on.
 
-```text
-/kaggle/working/dfire_yolov8n_base_results.zip
-```
+---
 
-## Verify on External Video
+## Offline weights
 
-After training, run your separate video through the trained model.
-
-Example:
+If the notebook has no internet, run this once somewhere that does:
 
 ```bash
-!python scripts/predict_video.py \
-  --weights /kaggle/working/runs/fire_smoke/dfire_yolov8n_base/weights/best.pt \
-  --source /kaggle/input/YOUR_VIDEO_DATASET/YOUR_VIDEO.mp4 \
-  --imgsz 960 \
-  --conf 0.25 \
-  --device 0 \
-  --project /kaggle/working/runs/fire_smoke_video
+python -c "import timm; timm.create_model('vit_small_patch16_dinov3.lvd1689m', pretrained=True)"
 ```
 
-The annotated verification output will be saved under:
+Upload `~/.cache/huggingface/hub/models--timm--vit_small_patch16_dinov3.lvd1689m/snapshots/*/model.safetensors`
+as a Kaggle dataset, then add to the training command:
 
-```text
-/kaggle/working/runs/fire_smoke_video/
+```bash
+--backbone-weights /kaggle/input/dinov3-vits16/model.safetensors
 ```
-
-## Important Reporting Note
-
-Your external video is not part of training, validation, or test. In the report, describe it as:
-
-```text
-External unseen verification video used for qualitative demonstration.
-```
-
-Use the D-Fire test split for actual benchmark metrics, and use the separate video for demonstration and sanity checking.

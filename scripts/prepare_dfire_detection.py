@@ -48,7 +48,7 @@ def validate_label(label_path: Path) -> tuple[int, list[str]]:
             class_id = int(parts[0])
             coords = [float(x) for x in parts[1:]]
         except ValueError:
-            errors.append(f"{label_path}:{line_no}: non-numeric YOLO value")
+            errors.append(f"{label_path}:{line_no}: non-numeric annotation value")
             continue
         if class_id not in (0, 1):
             errors.append(f"{label_path}:{line_no}: unexpected class id {class_id}")
@@ -59,18 +59,23 @@ def validate_label(label_path: Path) -> tuple[int, list[str]]:
     return box_count, errors
 
 
-def sanitize_label(src: Path, dst: Path) -> tuple[int, int, list[str]]:
+def sanitize_label(src: Path, dst: Path) -> tuple[int, int, int, list[str]]:
+    """Copy a label file, clamping coordinates and dropping degenerate boxes.
+
+    Returns (kept_boxes, coordinate_fixes, dropped_boxes, errors).
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         dst.unlink()
 
     output_lines = []
     fixes = 0
+    dropped = 0
     errors = []
     text = src.read_text(encoding="utf-8", errors="replace").strip()
     if not text:
         dst.write_text("", encoding="utf-8")
-        return 0, fixes, errors
+        return 0, fixes, dropped, errors
 
     for line_no, line in enumerate(text.splitlines(), start=1):
         parts = line.split()
@@ -81,7 +86,7 @@ def sanitize_label(src: Path, dst: Path) -> tuple[int, int, list[str]]:
             class_id = int(parts[0])
             coords = [float(x) for x in parts[1:]]
         except ValueError:
-            errors.append(f"{src}:{line_no}: non-numeric YOLO value")
+            errors.append(f"{src}:{line_no}: non-numeric annotation value")
             continue
 
         if class_id not in (0, 1):
@@ -95,13 +100,20 @@ def sanitize_label(src: Path, dst: Path) -> tuple[int, int, list[str]]:
                 fixes += 1
             clean_coords.append(clean_value)
 
+        # D-Fire contains a handful of zero-area annotations. torchvision
+        # refuses a whole batch if one degenerate box reaches it, so drop them
+        # here rather than at training time.
+        if clean_coords[2] <= 0.0 or clean_coords[3] <= 0.0:
+            dropped += 1
+            continue
+
         output_lines.append(
             f"{class_id} "
             + " ".join(f"{value:.10f}".rstrip("0").rstrip(".") for value in clean_coords)
         )
 
     dst.write_text(("\n".join(output_lines) + ("\n" if output_lines else "")), encoding="utf-8")
-    return len(output_lines), fixes, errors
+    return len(output_lines), fixes, dropped, errors
 
 
 def prepare_split(raw_root: Path, out_root: Path, split_name: str, filenames: list[str], source_split: str, mode: str) -> dict:
@@ -119,6 +131,7 @@ def prepare_split(raw_root: Path, out_root: Path, split_name: str, filenames: li
         "missing": [],
         "label_errors": [],
         "coordinate_fixes": 0,
+        "dropped_zero_area_boxes": 0,
         "link_mode": {"linked": 0, "copied": 0, "existing": 0},
     }
 
@@ -151,9 +164,10 @@ def prepare_split(raw_root: Path, out_root: Path, split_name: str, filenames: li
                     elif parts[0] == "1":
                         stats["class_counts"]["1_fire"] += 1
 
-        box_count, fixes, errors = sanitize_label(label_src, dst_labels / label_src.name)
+        box_count, fixes, dropped, errors = sanitize_label(label_src, dst_labels / label_src.name)
         stats["boxes"] += box_count
         stats["coordinate_fixes"] += fixes
+        stats["dropped_zero_area_boxes"] += dropped
         stats["label_errors"].extend(errors[:20])
         stats["images"] += 1
         stats["labels"] += 1
@@ -179,9 +193,9 @@ def write_yaml(out_root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare D-Fire as a clean YOLO fire/smoke dataset.")
+    parser = argparse.ArgumentParser(description="Prepare D-Fire as a clean normalized fire/smoke detection dataset.")
     parser.add_argument("--raw-root", default="datasets/raw/D-Fire", help="Path to raw D-Fire folder.")
-    parser.add_argument("--out-root", default="datasets/processed/fire_smoke_yolo", help="Output YOLO dataset folder.")
+    parser.add_argument("--out-root", default="datasets/processed/fire_smoke_detection", help="Output detection dataset folder.")
     parser.add_argument("--mode", choices=["link", "copy"], default="link", help="Use hardlinks when possible, or copy files.")
     args = parser.parse_args()
 
@@ -217,7 +231,8 @@ def main() -> None:
             f"{split}: images={stats['images']} labels={stats['labels']} "
             f"empty={stats['empty_labels']} boxes={stats['boxes']} "
             f"smoke={stats['class_counts']['0_smoke']} fire={stats['class_counts']['1_fire']} "
-            f"coordinate_fixes={stats['coordinate_fixes']}"
+            f"coordinate_fixes={stats['coordinate_fixes']} "
+            f"dropped_zero_area={stats['dropped_zero_area_boxes']}"
         )
         if stats["missing"]:
             print(f"  missing files: {len(stats['missing'])}")

@@ -11,7 +11,7 @@ def main() -> None:
     for path in sorted(input_root.iterdir()):
         print(f"- {path}")
 
-    print("\nDetected data.yaml files:")
+    print("\nDetected detection dataset config files:")
     yamls = sorted(input_root.rglob("data.yaml"))
     if not yamls:
         print("- none")

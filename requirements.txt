@@ -1,7 +1,6 @@
-ultralytics
-opencv-python
-pyyaml
-numpy
-matplotlib
-pandas
-tqdm
+# Superseded. The project moved from YOLOv8 to a DINOv3-based detector on
+# 2026-09-06 (see PROJECT_LOG.md). Use:
+#
+#     pip install -r requirements_dinov3.txt
+#
+# `scripts/build_project_plan_pdf.py` additionally needs `reportlab`.
