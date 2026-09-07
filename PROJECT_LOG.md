@@ -464,7 +464,9 @@ stride-16 trunk with an upsampled P3 localises worst.
 | 0.85 | 1.18% | 0.860 | 0.887 |
 | 0.90 | **0.37%** | 0.758 | 0.828 |
 
-The 1% budget forces 0.90, which costs ~14 points of fire recall against 0.85.
+The 1% budget forces 0.90, because 0.85 sits just outside it at 1.18%. That
+last step costs 10.3 points of fire recall (0.860 -> 0.758), and 14.3 points
+against 0.80.
 That trade is worth revisiting once temporal confirmation is in the loop — see
 the caveat in §8, step 4.
 
