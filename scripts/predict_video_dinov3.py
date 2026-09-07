@@ -28,6 +28,8 @@ import argparse
 import csv
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -189,8 +191,79 @@ def open_source(source: str):
         capture = cv2.VideoCapture(int(source), backend)
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Ask the driver not to queue frames. Not all backends honour it, which
+        # is why LatestFrameReader exists as well.
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         return capture
     return cv2.VideoCapture(source)
+
+
+def resolve_fps(capture, is_live: bool) -> float:
+    """Frame rate, with a sane fallback.
+
+    Webcams routinely report -1 or 0 for CAP_PROP_FPS through DirectShow. A
+    bare `or 25.0` does not catch -1 (it is truthy), which silently produced
+    negative timestamps in the event log.
+    """
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    if fps is None or fps <= 0 or fps > 240 or fps != fps:  # last test catches NaN
+        if not is_live:
+            print(f"warning: source reported fps={fps}; assuming 25.")
+        return 25.0
+    return float(fps)
+
+
+class LatestFrameReader:
+    """Background reader that always hands back the newest frame.
+
+    Inference runs at roughly 1 fps on CPU while the camera produces 30. A
+    plain read() then returns progressively staler queued frames and the
+    window drifts seconds behind reality -- it looks like lag, but it is the
+    detector being shown the past. This thread drains the camera continuously
+    and keeps only the most recent frame, so every inference is on 'now'.
+    """
+
+    def __init__(self, capture) -> None:
+        self.capture = capture
+        self._lock = threading.Lock()
+        self._frame = None
+        self._alive = True
+        self._stop = False
+        self._dropped = 0
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop:
+            ok, frame = self.capture.read()
+            if not ok:
+                self._alive = False
+                return
+            with self._lock:
+                if self._frame is not None:
+                    self._dropped += 1
+                self._frame = frame
+
+    def read(self, timeout: float = 5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if self._frame is not None:
+                    frame, self._frame = self._frame, None
+                    return True, frame
+            if not self._alive:
+                return False, None
+            time.sleep(0.005)
+        return False, None
+
+    @property
+    def dropped(self) -> int:
+        return self._dropped
+
+    def release(self) -> None:
+        self._stop = True
+        self._thread.join(timeout=1.0)
+        self.capture.release()
 
 
 def main() -> None:
@@ -202,14 +275,25 @@ def main() -> None:
     image_size = model.config["image_size"]
     use_amp = args.amp and device.type == "cuda"
 
+    is_live = args.source.isdigit()
     capture = open_source(args.source)
     if not capture.isOpened():
         raise SystemExit(f"Could not open source: {args.source}")
 
-    fps = capture.get(cv2.CAP_PROP_FPS) or 25.0
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    fps = resolve_fps(capture, is_live)
+    if is_live:
+        # Take one frame to learn the true resolution before the reader thread
+        # starts; driver-reported width/height are not always what you get.
+        ok, probe = capture.read()
+        if not ok:
+            raise SystemExit(f"Opened camera {args.source} but could not read a frame from it.")
+        height, width = probe.shape[:2]
+    else:
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    reader = LatestFrameReader(capture) if is_live else capture
+
+    total_frames = 0 if is_live else int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     if args.max_frames:
         total_frames = min(total_frames, args.max_frames) if total_frames else args.max_frames
 
@@ -259,15 +343,18 @@ def main() -> None:
     last_glow: tuple | None = None
 
     frame_index = 0
+    started_at = time.time()
     progress = tqdm(total=total_frames or None, desc="frames")
 
     while True:
-        ok, frame = capture.read()
+        ok, frame = reader.read()
         if not ok:
             break
         if args.max_frames and frame_index >= args.max_frames:
             break
-        timestamp = frame_index / fps
+        # For a live camera, wall-clock time is the truth: frames are dropped
+        # to stay current, so frame_index / fps would drift badly.
+        timestamp = (time.time() - started_at) if is_live else frame_index / fps
 
         if frame_index % args.stride == 0:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -351,7 +438,9 @@ def main() -> None:
                        (last_glow[0][0], last_glow[0][1] - 6), GLOW_COLOR, 0.55)
 
         status = [
-            (f"t={timestamp:6.1f}s  frame {frame_index}", (255, 255, 255)),
+            (f"t={timestamp:6.1f}s  frame {frame_index}"
+             + (f"  {frame_index / max(timestamp, 1e-6):4.1f} fps"
+                f"  dropped {reader.dropped}" if is_live else ""), (255, 255, 255)),
             (f"scene  smoke {last_scene[0]:.2f}   fire {last_scene[1]:.2f}", (200, 255, 200)),
             (f"tracks {len(confirmer.tracks)}   confirmed {len(last_alarms)}", (200, 220, 255)),
         ]
@@ -375,7 +464,7 @@ def main() -> None:
         progress.update(1)
 
     progress.close()
-    capture.release()
+    reader.release()
     if writer is not None:
         writer.release()
     if args.show:

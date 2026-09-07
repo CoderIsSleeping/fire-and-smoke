@@ -1,0 +1,5 @@
+frame,time_s,event,class,score,x1,y1,x2,y2,detail
+40,-40.00,ALARM_ON,fire,0.498,993,452,1060,528,3/8 hits
+48,-48.00,ALARM_OFF,,,,,,,track 1
+60,-60.00,ALARM_ON,fire,0.655,1062,403,1113,473,3/8 hits
+78,-78.00,ALARM_OFF,,,,,,,track 2
