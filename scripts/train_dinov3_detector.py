@@ -155,8 +155,10 @@ def train_one_epoch(model, loader, optimizer, scaler, device, args, global_step,
     base_lrs = [group["lr"] for group in optimizer.param_groups]
 
     progress = tqdm(loader, desc="train", leave=False)
+    last_lr = base_lrs[0]
     for step, (images, targets, scene, glow) in enumerate(progress):
         factor = lr_factor(global_step, args.warmup_iters, total_steps)
+        last_lr = base_lrs[0] * factor
         for group, base in zip(optimizer.param_groups, base_lrs):
             group["lr"] = base * factor
 
@@ -201,6 +203,9 @@ def train_one_epoch(model, loader, optimizer, scaler, device, args, global_step,
 
     averaged = {k: v / max(batches, 1) for k, v in sums.items()}
     averaged["skipped_batches"] = skipped
+    # The scheduled LR at the end of the epoch. Logging param_groups[0]["lr"]
+    # here would always report the base LR, because it is restored above.
+    averaged["lr"] = last_lr
     return averaged, global_step
 
 
@@ -352,6 +357,10 @@ def main() -> None:
     start_epoch = 1
     global_step = 0
     best_map = -1.0
+    best_epoch = 0
+    best_det: dict | None = None
+    best_sweep: list[dict] | None = None
+    best_operating: dict | None = None
     stale = 0
     history: list[dict] = []
 
@@ -398,7 +407,7 @@ def main() -> None:
         row = {
             "epoch": epoch,
             "seconds": round(time.time() - started, 1),
-            "lr": optimizer.param_groups[0]["lr"],
+            "lr": round(train_stats.get("lr", args.lr), 10),
             "train_total": round(train_stats.get("total", 0.0), 5),
             "skipped_batches": train_stats.get("skipped_batches", 0),
             "mAP50": round(det["mAP50"], 5),
@@ -444,6 +453,8 @@ def main() -> None:
 
         if det["mAP50"] > best_map:
             best_map = det["mAP50"]
+            best_epoch = epoch
+            best_det, best_sweep, best_operating = det, sweep, operating
             stale = 0
             # best.pt is the deployment artifact and gets downloaded off Kaggle,
             # so it stays weights-only - roughly half the size of last.pt.
@@ -482,19 +493,25 @@ def main() -> None:
                 f"- backbone: `{args.backbone}` (unfrozen blocks: {args.unfreeze_last_n})",
                 f"- image size: {args.imgsz}, batch {args.batch} x accum {args.accum}",
                 f"- epochs run: {len(history)}",
+                f"- best epoch: {best_epoch} (this is what weights/best.pt contains)",
                 f"- best val mAP@0.5: {best_map:.4f}",
                 "",
-                "## Validation detection metrics (best epoch)",
+                f"## Validation detection metrics (epoch {best_epoch})",
                 "",
                 "```",
-                format_detection_table(det),
+                format_detection_table(best_det),
                 "```",
                 "",
-                "## Alarm sweep on the validation split",
+                f"## Alarm sweep on the validation split (epoch {best_epoch})",
                 "",
                 "```",
-                format_alarm_table(sweep),
+                format_alarm_table(best_sweep),
                 "```",
+                "",
+                f"Recommended operating threshold for FPR <= {args.target_fpr:.3f}: "
+                f"conf >= {best_operating['threshold']:.2f} "
+                f"(FPR {best_operating['fpr']:.4f}, fire recall {best_operating['recall_fire']:.4f}, "
+                f"smoke recall {best_operating['recall_smoke']:.4f})",
                 "",
                 "`FPR` is the fraction of verified-negative images that produced at least one",
                 "box at that confidence. Multiply by the frame rate to get false boxes per",

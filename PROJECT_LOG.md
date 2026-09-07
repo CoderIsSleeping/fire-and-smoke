@@ -4,7 +4,7 @@ Living document. Everything about *what exists*, *what changed*, and *why* lives
 here, so the project can be explained to a supervisor, an examiner or a new
 teammate without re-reading the code.
 
-Last updated: **2026-09-06**
+Last updated: **2026-09-07**
 
 ---
 
@@ -410,11 +410,12 @@ Dataset preparation, validation and YOLO training scripts.
 - [x] Model, training, evaluation and video scripts written and smoke-tested
 - [x] False-alarm measurement and operating-point selection
 - [x] This log
+- [x] Stage-1 training run (40 epochs, val mAP@0.5 = 0.7312)
 
 **Next, in order**
-1. **Run the real training on Kaggle** — the numbers in §9 are placeholders
-   until this happens.
+1. ~~Run the real training on Kaggle~~ — **done 2026-09-07**, val mAP@0.5 = 0.7312 (§9).
 2. **Evaluate on the D-Fire test split**, record mAP and the operating threshold.
+   This is the number the report quotes; val was only used for model selection.
 3. **Inspect the saved false positives** and note the failure modes (welding,
    sunset, steam, headlights) — this directly informs the report.
 4. **Collect site videos**, then run `predict_video_dinov3.py` and tune the
@@ -429,9 +430,52 @@ Dataset preparation, validation and YOLO training scripts.
 *(Fill in after the Kaggle run. Keep every row, including the bad ones — the
 comparison between configurations is the interesting part of the report.)*
 
-| date | config | val mAP@0.5 | test mAP@0.5 | AP50 fire | AP50 smoke | op. threshold | FPR at op. | recall at op. |
+| date | config | val mAP@0.5 | test mAP@0.5 | AP50 fire | AP50 smoke | op. thr | FPR at op. | fire recall at op. |
 |---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| 2026-09-07 | stage 1, frozen trunk, 640px, batch 8, 40 ep | **0.7312** | *pending* | 0.6412 | 0.8212 | 0.90 | 0.0037 | 0.758 |
+
+Stage 1, best epoch 38 of 40 (~11 min/epoch, ~7.4 h on Kaggle P100, 0 skipped
+batches so AMP was stable). Full sweep in `best_metrics.json`.
+
+### Reading the first run
+
+| metric | smoke | fire |
+|---|---|---|
+| AP@0.5 | 0.8212 | 0.6412 |
+| AP@0.75 | 0.4285 | 0.2315 |
+| AP@0.5:0.95 | 0.4466 | 0.2981 |
+| AP75 / AP50 | 0.52 | **0.36** |
+
+**Fire is the weak class, and the problem is localisation, not detection.**
+Fire AP50 is 0.64 while AP75 is 0.23 — the model finds the fire and then boxes
+it sloppily. Smoke holds up far better at the tighter IoU.
+
+The likely cause is object size. In the training split, fire appears in 3,819
+images but contributes 9,659 boxes (2.5 per image), whereas smoke appears in
+6,778 images with 7,660 boxes (1.1 per image). Fire in D-Fire is many small
+flames; smoke is one big plume. Small objects are exactly what a frozen
+stride-16 trunk with an upsampled P3 localises worst.
+
+**The alarm curve is steep in the right place.**
+
+| conf | FPR (1,610 negatives) | fire recall | smoke recall |
+|---|---|---|---|
+| 0.80 | 1.55% | 0.901 | 0.921 |
+| 0.85 | 1.18% | 0.860 | 0.887 |
+| 0.90 | **0.37%** | 0.758 | 0.828 |
+
+The 1% budget forces 0.90, which costs ~14 points of fire recall against 0.85.
+That trade is worth revisiting once temporal confirmation is in the loop — see
+the caveat in §8, step 4.
+
+**The scene head is a genuinely useful second opinion.** At 0.5 it gives fire
+recall 0.901 at precision 0.927 (FPR 0.025); at 0.95 it reaches precision 1.000
+with recall 0.554 and *zero* false positives on 1,610 negatives. That is a
+strong cross-check signal, and it validates the two-head design.
+
+**Training had converged.** mAP@0.5 moved 0.7224 → 0.7297 over epochs 30–40 and
+train loss was flat at ~0.31. More epochs at this configuration will not help;
+the next gain has to come from resolution, unfreezing, or better data.
 
 ---
 
