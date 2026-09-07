@@ -411,16 +411,18 @@ Dataset preparation, validation and YOLO training scripts.
 - [x] False-alarm measurement and operating-point selection
 - [x] This log
 - [x] Stage-1 training run (40 epochs, val mAP@0.5 = 0.7312)
+- [x] Stage-2 fine-tune (15 epochs, val mAP@0.5 = 0.7406)
+- [x] Test-split evaluation (mAP@0.5 = 0.7261, FPR 0.70% at conf 0.90)
 
 **Next, in order**
 1. ~~Run the real training on Kaggle~~ — **done 2026-09-07**, val mAP@0.5 = 0.7312 (§9).
-2. **Evaluate on the D-Fire test split**, record mAP and the operating threshold.
-   This is the number the report quotes; val was only used for model selection.
+2. ~~Evaluate on the D-Fire test split~~ — **done**, mAP@0.5 = 0.7261 at 0.70% FPR (§9).
 3. **Inspect the saved false positives** and note the failure modes (welding,
    sunset, steam, headlights) — this directly informs the report.
 4. **Collect site videos**, then run `predict_video_dinov3.py` and tune the
    confirmation window against real frame rates.
-5. **Stage 2 fine-tune** (`--unfreeze-last-n 2`) only if stage 1 metrics justify it.
+5. ~~Stage 2 fine-tune~~ — **done**, +0.9 mAP@0.5. Further training should change
+   `--imgsz`, not the unfreeze depth.
 6. **Collect real occluded-fire footage** to properly validate R3.
 
 ---
@@ -432,7 +434,17 @@ comparison between configurations is the interesting part of the report.)*
 
 | date | config | val mAP@0.5 | test mAP@0.5 | AP50 fire | AP50 smoke | op. thr | FPR at op. | fire recall at op. |
 |---|---|---|---|---|---|---|---|---|
-| 2026-09-07 | stage 1, frozen trunk, 640px, batch 8, 40 ep | **0.7312** | *pending* | 0.6412 | 0.8212 | 0.90 | 0.0037 | 0.758 |
+| 2026-09-07 | stage 1, frozen trunk, 640px, batch 8, 40 ep | 0.7312 | - | 0.6412 | 0.8212 | 0.90 | 0.0037 | 0.758 |
+| 2026-09-07 | stage 2, unfreeze last 2, lr 5e-5, 15 ep | **0.7406** | **0.7261** | 0.6556 | 0.8255 | 0.90 | 0.0070 | 0.780 |
+
+**Headline result for the report (stage 2, D-Fire test split, 4,306 images):**
+
+> mAP@0.5 = **0.726** (smoke 0.815, fire 0.638), at confidence 0.90 with a
+> false-alarm rate of **0.70%** — 14 of 2,005 verified-negative images — and
+> fire recall 0.780, smoke recall 0.839.
+
+Val-to-test gap is only 1.5 points of mAP@0.5 (0.7406 -> 0.7261), so the model
+is not overfitting the validation split in any worrying way.
 
 Stage 1, best epoch 38 of 40 (~11 min/epoch, ~7.4 h on Kaggle P100, 0 skipped
 batches so AMP was stable). Full sweep in `best_metrics.json`.
@@ -478,6 +490,52 @@ strong cross-check signal, and it validates the two-head design.
 **Training had converged.** mAP@0.5 moved 0.7224 → 0.7297 over epochs 30–40 and
 train loss was flat at ~0.31. More epochs at this configuration will not help;
 the next gain has to come from resolution, unfreezing, or better data.
+
+### Stage 2: what unfreezing bought
+
+Unfreezing the last 2 trunk blocks at lr 5e-5 for 15 epochs:
+
+| | stage 1 | stage 2 | delta |
+|---|---|---|---|
+| val mAP@0.5 | 0.7312 | 0.7406 | +0.0094 |
+| fire AP50 | 0.6412 | 0.6556 | +0.0144 |
+| smoke AP50 | 0.8212 | 0.8255 | +0.0043 |
+| **fire AP75** | **0.2315** | **0.2426** | **+0.0111** |
+| scene head, fire recall @0.5 | ~0.90 | **0.952** | +0.05 |
+
+Small but real, and it cost 3.3 h of GPU. Two things worth noting:
+
+1. **It did not fix localisation.** Fire AP75/AP50 is still 0.37. The
+   hypothesis in the stage-1 analysis was that fire is many small objects and a
+   stride-16 trunk with an upsampled P3 localises them poorly. Unfreezing
+   improves the *features*, not the *spatial resolution*, and the result is
+   consistent with that: detection improved, tight-IoU localisation barely did.
+   The remaining lever is `--imgsz`, not more unfreezing.
+2. **The scene head gained the most** — fire recall 0.90 → 0.952 at roughly
+   unchanged FPR (~0.02). The image-level classifier benefits more from
+   adapted features than the box head does.
+
+**Does AP75 actually matter here?** Largely no. The deliverable is an alarm,
+not a segmentation mask — knowing there is fire and roughly where is enough to
+wake somebody up. The one place sloppy boxes do hurt is the temporal tracker,
+because low frame-to-frame IoU makes track linking less reliable. `--iou-match`
+defaults to 0.20, which is already loose enough to absorb this, but it is worth
+watching on real footage.
+
+### Test-split behaviour (stage 2)
+
+| conf | FPR (2,005 negatives) | fire recall | smoke recall |
+|---|---|---|---|
+| 0.80 | 1.75% | 0.897 | 0.924 |
+| 0.85 | 1.30% | 0.857 | 0.899 |
+| 0.90 | **0.70%** | 0.780 | 0.839 |
+
+At 5 fps, 0.70% is ~126 false boxes per hour *before* temporal confirmation.
+For video, `--conf 0.85 --exit-conf 0.70` is the better starting point than the
+0.90 the budget picks: the N-of-M rule handles transients, and the extra 8
+points of fire recall matter more than a per-frame FPR the confirmation layer
+is going to absorb anyway. Persistent false positives (a sunset, a fixed warm
+lamp) are the ones to watch, and those are an ignore-mask problem.
 
 ---
 
