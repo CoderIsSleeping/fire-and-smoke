@@ -78,6 +78,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-box-size", type=float, default=4.0,
                    help="Discard detections thinner than this many pixels in the source frame.")
     p.add_argument("--no-boxes", action="store_true", help="Only draw confirmed alarms, not raw detections.")
+    p.add_argument("--show", action="store_true",
+                   help="Display a live annotated window (press q to stop). Needed for webcam testing.")
+    p.add_argument("--no-save", action="store_true", help="Do not write an output video (use with --show).")
     return p.parse_args()
 
 
@@ -176,8 +179,17 @@ def draw_hud(frame, status_lines, banner):
 
 
 def open_source(source: str):
+    """Open a file path or a camera index.
+
+    On Windows the default backend takes several seconds to open a webcam and
+    sometimes fails outright, so use DirectShow for camera indices.
+    """
     if source.isdigit():
-        return cv2.VideoCapture(int(source))
+        backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+        capture = cv2.VideoCapture(int(source), backend)
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        return capture
     return cv2.VideoCapture(source)
 
 
@@ -203,7 +215,10 @@ def main() -> None:
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    writer = (
+        None if args.no_save
+        else cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    )
 
     events_path = Path(args.events) if args.events else output_path.with_suffix(".events.csv")
     events_file = events_path.open("w", newline="", encoding="utf-8")
@@ -349,16 +364,26 @@ def main() -> None:
             banner = ("SMOKE ALARM", (90, 90, 90))
         draw_hud(frame, status, banner)
 
-        writer.write(frame)
+        if writer is not None:
+            writer.write(frame)
+        if args.show:
+            cv2.imshow("fire / smoke  --  press q to stop", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("stopped by user")
+                break
         frame_index += 1
         progress.update(1)
 
     progress.close()
     capture.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
+    if args.show:
+        cv2.destroyAllWindows()
     events_file.close()
 
-    print(f"\nwrote video : {output_path}")
+    if writer is not None:
+        print(f"\nwrote video : {output_path}")
     print(f"wrote events: {events_path}")
 
 
