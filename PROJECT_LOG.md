@@ -233,6 +233,7 @@ scripts/
   eval_dinov3_detector.py         test-split metrics, operating point, false-positive dump
   predict_video_dinov3.py         video inference with alarm logic and an event log
   analyze_glow_prior.py           diagnostic: AUC of each glow feature, fire vs negative
+  eval_videos_dinov3.py           full-pipeline evaluation on a folder of videos
   list_kaggle_inputs.py           lists what Kaggle actually mounted
   build_project_plan_pdf.py       report/plan PDF builder (from the earlier stage)
 
@@ -419,8 +420,16 @@ Dataset preparation, validation and YOLO training scripts.
 2. ~~Evaluate on the D-Fire test split~~ — **done**, mAP@0.5 = 0.7261 at 0.70% FPR (§9).
 3. **Inspect the saved false positives** and note the failure modes (welding,
    sunset, steam, headlights) — this directly informs the report.
-4. **Collect site videos**, then run `predict_video_dinov3.py` and tune the
-   confirmation window against real frame rates.
+4. **Video evaluation.** D-Fire references 100 surveillance videos (50 `FP*`,
+   50 `VP*`) that are **not** in the 3 GB image download -- they ship via a
+   separate OneDrive link in the dataset README. `eval_videos_dinov3.py` runs
+   the whole pipeline over them and reports video-level false-alarm rate and
+   time-to-alarm, which is the only way to validate the temporal layer on real
+   footage. Then repeat on site footage.
+
+   Note: `FP`/`VP` are not defined in the D-Fire README. The inference is
+   fire-like-but-no-fire vs real fire; confirm on a couple of clips before
+   quoting the numbers.
 5. ~~Stage 2 fine-tune~~ — **done**, +0.9 mAP@0.5. Further training should change
    `--imgsz`, not the unfreeze depth.
 6. **Collect real occluded-fire footage** to properly validate R3.
