@@ -76,7 +76,12 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--negative-prefix", default="FP", help="Filename prefix for no-fire footage.")
     p.add_argument("--positive-prefix", default="VP", help="Filename prefix for real-fire footage.")
-    p.add_argument("--labels", default=None, help='JSON: {"clip.mp4": "positive", ...}. Overrides prefixes.')
+    p.add_argument("--positive-dirs", default="positive",
+                   help="Comma-separated folder names holding real-fire footage.")
+    p.add_argument("--negative-dirs", default="negative",
+                   help="Comma-separated folder names holding no-fire footage.")
+    p.add_argument("--labels", default=None,
+                   help='JSON: {"clip.mp4": "positive", ...}. Overrides folders and prefixes.')
 
     p.add_argument("--conf-grid", default="0.5,0.6,0.7,0.8,0.85,0.9,0.95")
     p.add_argument("--hits-grid", default="3,4,6,8")
@@ -98,10 +103,34 @@ def resolve_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def label_for(name: str, args, overrides: dict) -> str | None:
-    if name in overrides:
-        return overrides[name]
-    stem = Path(name).name.upper()
+def label_for(path: Path, root: Path, args, overrides: dict) -> str | None:
+    """Decide whether a clip contains real fire.
+
+    Three mechanisms, most explicit first:
+      1. an entry in the --labels JSON,
+      2. a parent folder named in --positive-dirs / --negative-dirs, which is
+         how datasets that ship as separate zips (KMU, for instance) naturally
+         extract,
+      3. a filename prefix, which is how D-Fire names its FP*/VP* clips.
+    """
+    relative = path.relative_to(root).as_posix() if path.is_relative_to(root) else path.name
+    if relative in overrides:
+        return overrides[relative]
+    if path.name in overrides:
+        return overrides[path.name]
+
+    positive_dirs = {d.strip().lower() for d in args.positive_dirs.split(",") if d.strip()}
+    negative_dirs = {d.strip().lower() for d in args.negative_dirs.split(",") if d.strip()}
+    try:
+        parts = {p.lower() for p in path.relative_to(root).parts[:-1]}
+    except ValueError:
+        parts = set()
+    if parts & negative_dirs:
+        return "negative"
+    if parts & positive_dirs:
+        return "positive"
+
+    stem = path.name.upper()
     if stem.startswith(args.positive_prefix.upper()):
         return "positive"
     if stem.startswith(args.negative_prefix.upper()):
@@ -232,16 +261,22 @@ def main() -> None:
     cache_path = Path(args.cache) if args.cache else out_dir / "detections.npz"
 
     overrides = json.loads(Path(args.labels).read_text(encoding="utf-8")) if args.labels else {}
-    labelled = {v.name: label_for(v.name, args, overrides) for v in videos}
+    def key_of(v: Path) -> str:
+        return v.relative_to(video_root).as_posix()
+
+    labelled = {key_of(v): label_for(v, video_root, args, overrides) for v in videos}
+    if len(labelled) != len(videos):
+        raise SystemExit("internal error: video keys collided")
     n_pos = sum(1 for x in labelled.values() if x == "positive")
     n_neg = sum(1 for x in labelled.values() if x == "negative")
     n_unknown = sum(1 for x in labelled.values() if x is None)
 
     print(f"videos    : {len(videos)} under {video_root}")
-    print(f"labelled  : {n_pos} positive ({args.positive_prefix}*), {n_neg} negative ({args.negative_prefix}*)"
+    print(f"labelled  : {n_pos} with fire, {n_neg} without"
           + (f", {n_unknown} unlabelled (ignored in the summary)" if n_unknown else ""))
     if n_pos == 0 and n_neg == 0:
-        print("warning: nothing matched the prefixes. Pass --labels or set --positive-prefix/--negative-prefix.")
+        print("warning: nothing was labelled. Put clips under positive/ and negative/ folders,")
+        print("         or pass --labels, --positive-prefix / --negative-prefix.")
 
     # ---- pass 1: inference ----
     if args.reuse_cache and cache_path.exists():
@@ -259,9 +294,9 @@ def main() -> None:
         for video in tqdm(videos, desc="videos"):
             record = cache_detections(model, video, device, args, image_size)
             if "error" in record:
-                print(f"  skipped {video.name}: {record['error']}")
+                print(f"  skipped {key_of(video)}: {record['error']}")
                 continue
-            records[video.name] = record
+            records[key_of(video)] = record
         total_frames = sum(r["processed_frames"] for r in records.values())
         elapsed = time.time() - started
         print(f"\ninference: {total_frames} frames in {elapsed/60:.1f} min "
