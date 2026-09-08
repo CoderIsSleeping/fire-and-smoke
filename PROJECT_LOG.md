@@ -331,6 +331,93 @@ real footage, where the correlation should not exist at all.
 
 ---
 
+## 6b. Deployment scale: 70 cameras at 10 fps
+
+Stated by the customer on 2026-09-09. This is **700 frames per second**, and it
+is a different engineering problem from detection quality.
+
+### Measured throughput
+
+| | fps at 640px |
+|---|---|
+| Local CPU (6 threads) | 0.86 |
+| Kaggle P100 *(derived, see below)* | ~40 |
+| **Required** | **700** |
+
+The P100 figure is derived, not measured: stage-1 epochs ran ~655 s for 13,776
+train + 3,445 val images with the trunk frozen under `no_grad`, which works out
+to roughly 25 ms per forward pass. Measure it properly with
+`scripts/benchmark_throughput.py --device cuda` before sizing hardware.
+
+Every-frame at 640px would need **~17 P100s**. Not viable.
+
+### Where the time goes, and what is actually free
+
+At 640px on CPU: trunk **67%**, detection head **33%**. The head does fixed work
+on 1000 RPN proposals however few fires exist.
+
+Measured on a 400-image test subset:
+
+| config | mAP@0.5 | fire AP50 | recall at FPR 0.005 | verdict |
+|---|---|---|---|---|
+| 640 / 1000 prop / 50 det | 0.7644 | 0.7016 | 0.9204 | baseline |
+| **640 / 300 prop / 20 det** | **0.7634** | 0.7000 | **0.9204** | **free, ~1.4x faster** |
+| 448 / 1000 prop / 50 det | 0.6545 | 0.5928 | 0.6816 | rejected |
+| 448 / 300 prop / 20 det | 0.6527 | 0.5889 | 0.6766 | rejected |
+
+Two conclusions, and the second one killed my first instinct:
+
+1. **Fewer proposals is free.** −0.001 mAP, identical recall, ~1.4x faster head.
+   Now the default (`rpn_post_nms_top_n_test=300`, `box_detections_per_img=20`).
+   Training-time counts are untouched, so nothing about fitting changes.
+2. **Downscaling is not.** 640 → 448 costs **11 points of mAP** and, far worse,
+   **24 points of recall** at the operating point (0.920 → 0.682). The apparent
+   2.9x speedup from "448 + fewer proposals" was almost entirely the resolution
+   change, and it would have thrown away a quarter of the detections. This is
+   the same small-object story as the AP75 analysis in §9: this task needs
+   pixels. **Resolution reduction is off the table as a throughput lever.**
+
+### The architecture that fits
+
+Do not run the ViT at 700 fps. Gate it.
+
+```text
+all 70 cameras @ 10 fps  ->  cheap CPU gate  ->  DINOv3 detector (GPU)
+                             frame diff 0.22 ms      only on flagged frames
+                             glow prior  9 ms        + guaranteed periodic sweep
+```
+
+| stage | load | hardware |
+|---|---|---|
+| gate, all cameras | 700 fps | ~7 CPU cores |
+| guaranteed sweep (70 x 0.5 fps) | 35 fps | |
+| gate passes (2% of 700) | 14 fps | |
+| **detector total** | **~49 fps** | **~1 GPU** |
+
+The **periodic sweep is not optional**. Without it, anything the gate misses is
+never seen by the detector at all, and a gate failure becomes a silent
+detection failure. The sweep bounds worst-case latency to 2 s per camera
+regardless of what the gate does.
+
+### Challenge the 10 fps figure
+
+Fire and smoke evolve over seconds. 10 fps *detection* is almost certainly
+over-specified; 10 fps is much more likely an **ingest** requirement (do not
+drop frames from the stream) than a detection one. Ingesting at 10 fps and
+detecting at 1-2 fps per camera is a 5-10x hardware saving, and the
+confirmation window simply gets expressed in seconds rather than frames. Worth
+confirming with the customer before anyone buys GPUs.
+
+### Never queue frames
+
+The webcam "lag" on 2026-09-08 was not slowness, it was staleness: frames
+queued while inference ran, so the detector was shown the past. Fixed with a
+thread that drains the camera and keeps only the newest frame. The same rule
+scales: one decode thread per camera that drops to latest, feeding a shared
+batched GPU worker. A fire alarm on 30-second-old video is worse than no alarm.
+
+---
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
