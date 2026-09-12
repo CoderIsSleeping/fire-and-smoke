@@ -1,0 +1,18 @@
+{
+  "train": {
+    "images": 13776,
+    "negatives": 6223,
+    "smoke_boxes": 7660,
+    "fire_boxes": 9659,
+    "images_with_smoke": 6778,
+    "images_with_fire": 3819
+  },
+  "val": {
+    "images": 3445,
+    "negatives": 1610,
+    "smoke_boxes": 1890,
+    "fire_boxes": 2155,
+    "images_with_smoke": 1666,
+    "images_with_fire": 888
+  }
+}
