@@ -54,7 +54,7 @@ from fire_smoke.glow import glow_features
 from fire_smoke.model import load_detector
 from fire_smoke.temporal import TemporalConfirmer
 
-VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".mpg", ".mpeg", ".wmv", ".flv"}
 # Cache detections down to this score so pass 2 can explore any threshold above it.
 CACHE_FLOOR = 0.15
 
