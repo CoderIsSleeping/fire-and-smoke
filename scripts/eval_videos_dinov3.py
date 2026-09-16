@@ -89,6 +89,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--exit-hits", type=int, default=2)
     p.add_argument("--iou-match", type=float, default=0.20)
     p.add_argument("--max-age", type=int, default=20)
+    p.add_argument("--save-alarm-frames", default=None, metavar="CONF,HITS",
+                   help="Write an annotated snapshot at every alarm onset for this setting, e.g. 0.85,6.")
+    p.add_argument("--max-snapshots", type=int, default=60)
     p.add_argument("--target-video-fpr", type=float, default=0.05,
                    help="Budget: fraction of no-fire videos allowed to alarm at all.")
     return p.parse_args()
@@ -217,8 +220,25 @@ def replay(record: dict, conf: float, enter_hits: int, args) -> dict:
     effective_fps = record["fps"] / args.stride
     first_alarm_frame = None
     alarm_frames = 0
+    events = []
+    active: set[int] = set()
     for i in range(record["processed_frames"]):
         alarms = confirmer.update(record["boxes"][i], record["scores"][i], record["labels"][i])
+        current = {a.track_id for a in alarms}
+        # An event is an alarm *onset*. For long continuous footage this is the
+        # number an operator experiences -- "videos that alarmed at least once"
+        # is far too coarse when the set is a handful of 20-minute recordings.
+        for alarm in alarms:
+            if alarm.track_id not in active:
+                events.append({
+                    "processed_index": i,
+                    "source_frame": int(record["frames"][i]),
+                    "time_s": record["frames"][i] / record["fps"],
+                    "class": alarm.class_name,
+                    "score": float(alarm.score),
+                    "box": [float(v) for v in alarm.box],
+                })
+        active = current
         if alarms:
             alarm_frames += 1
             if first_alarm_frame is None:
@@ -229,19 +249,69 @@ def replay(record: dict, conf: float, enter_hits: int, args) -> dict:
         "time_to_alarm_s": None if first_alarm_frame is None else first_alarm_frame / max(effective_fps, 1e-6),
         "alarm_seconds": alarm_frames / max(effective_fps, 1e-6),
         "duration_s": record["duration_s"],
+        "events": events,
     }
 
 
+def save_alarm_frames(records: dict, video_root: Path, details: dict, out_dir: Path, limit: int) -> int:
+    """Write an annotated snapshot at every alarm onset, for a human to look at.
+
+    Reads each video sequentially rather than seeking: CCTV exports use long
+    GOPs, and seeking into them decodes grey or corrupted frames.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for key, result in details.items():
+        # Several alarms can start on the same frame -- two dust plumes, say.
+        # Group them so every box is drawn, rather than one overwriting another.
+        wanted: dict[int, list[dict]] = {}
+        for event in result["events"]:
+            wanted.setdefault(event["source_frame"], []).append(event)
+        if not wanted:
+            continue
+        capture = cv2.VideoCapture(str(video_root / key))
+        index, last = 0, max(wanted)
+        while index <= last:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if index in wanted:
+                group = sorted(wanted[index], key=lambda e: -e["score"])
+                for event in group:
+                    x1, y1, x2, y2 = (int(v) for v in event["box"])
+                    colour = (0, 140, 255) if event["class"] == "fire" else (200, 200, 200)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 3)
+                    text = f"{event['class']} {event['score']:.2f}"
+                    cv2.rectangle(frame, (x1, max(0, y1 - 26)), (x1 + 13 * len(text), y1), colour, -1)
+                    cv2.putText(frame, text, (x1 + 4, max(18, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                                (0, 0, 0), 2, cv2.LINE_AA)
+                top = group[0]
+                banner = f"{key}   t={top['time_s'] / 60:.2f} min   {len(group)} alarm(s)"
+                cv2.rectangle(frame, (0, frame.shape[0] - 34), (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
+                cv2.putText(frame, banner, (10, frame.shape[0] - 11), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (255, 255, 255), 2, cv2.LINE_AA)
+                name = (f"{Path(key).stem[:40]}_{top['time_s']:07.1f}s_"
+                        f"{len(group)}x_{top['class']}_{top['score']:.2f}.jpg")
+                cv2.imwrite(str(out_dir / name.replace(' ', '_')), frame)
+                written += 1
+                if written >= limit:
+                    capture.release()
+                    return written
+            index += 1
+        capture.release()
+    return written
+
+
 def format_grid(rows: list[dict]) -> str:
-    header = (f"{'conf':>5} {'hits':>5} {'FP vids':>8} {'video FPR':>10} "
-              f"{'false alarm s/h':>16} {'VP vids':>8} {'detect rate':>12} {'median TTA':>11}")
+    header = (f"{'conf':>5} {'hits':>5} {'FP vids':>8} {'false alarms':>13} {'alarms/hour':>12} "
+              f"{'alarm s/h':>10} {'VP vids':>8} {'detect rate':>12} {'median TTA':>11}")
     lines = [header, "-" * len(header)]
     for r in rows:
         tta = "-" if r["median_time_to_alarm_s"] is None else f"{r['median_time_to_alarm_s']:.1f}s"
         lines.append(
             f"{r['conf']:>5.2f} {r['enter_hits']:>5d} "
-            f"{r['negatives_alarmed']:>3d}/{r['negatives']:<4d} {r['video_fpr']:>10.4f} "
-            f"{r['false_alarm_seconds_per_hour']:>16.1f} "
+            f"{r['negatives_alarmed']:>3d}/{r['negatives']:<4d} {r['false_alarm_events']:>13d} "
+            f"{r['false_alarm_events_per_hour']:>12.1f} {r['false_alarm_seconds_per_hour']:>10.1f} "
             f"{r['positives_alarmed']:>3d}/{r['positives']:<4d} {r['detect_rate']:>12.4f} {tta:>11}"
         )
     return "\n".join(lines)
@@ -314,6 +384,7 @@ def main() -> None:
         for hits in hits_grid:
             neg_alarmed = pos_alarmed = 0
             neg_total = pos_total = 0
+            neg_events = 0
             false_alarm_seconds = 0.0
             negative_hours = 0.0
             times_to_alarm = []
@@ -326,6 +397,7 @@ def main() -> None:
                 if kind == "negative":
                     neg_total += 1
                     negative_hours += result["duration_s"] / 3600.0
+                    neg_events += len(result["events"])
                     if result["alarmed"]:
                         neg_alarmed += 1
                         false_alarm_seconds += result["alarm_seconds"]
@@ -342,6 +414,9 @@ def main() -> None:
                 "negatives_alarmed": neg_alarmed,
                 "video_fpr": neg_alarmed / max(neg_total, 1),
                 "false_alarm_seconds_per_hour": false_alarm_seconds / max(negative_hours, 1e-6),
+                "false_alarm_events": neg_events,
+                "false_alarm_events_per_hour": neg_events / max(negative_hours, 1e-6),
+                "negative_hours": negative_hours,
                 "positives": pos_total,
                 "positives_alarmed": pos_alarmed,
                 "detect_rate": pos_alarmed / max(pos_total, 1),
@@ -360,7 +435,24 @@ def main() -> None:
     ]
     best = max(feasible, key=lambda r: (r["detect_rate"], -r["video_fpr"])) if feasible else None
     print()
-    if not any(r["detect_rate"] > 0 for r in rows):
+    if n_pos == 0 and n_neg > 0:
+        # Negatives only -- e.g. a customer's normal working-day footage. There is
+        # no detection rate to trade against, so report what an operator would
+        # live with: false-alarm events per hour at each setting.
+        hours = rows[0]["negative_hours"] if rows else 0.0
+        print(f"No-fire footage only ({hours * 60:.1f} min across {n_neg} videos): every alarm here is false.")
+        quiet = [r for r in rows if r["false_alarm_events"] == 0]
+        if quiet:
+            lowest = min(quiet, key=lambda r: (r["conf"], r["enter_hits"]))
+            print(f"  lowest setting with ZERO false alarms: conf {lowest['conf']:.2f}, "
+                  f"{lowest['enter_hits']}-of-{args.window}")
+        else:
+            print("  every setting in the grid raised at least one false alarm on this footage.")
+        worst = max(rows, key=lambda r: r["false_alarm_events_per_hour"])
+        print(f"  most sensitive setting (conf {worst['conf']:.2f}, {worst['enter_hits']}-of-{args.window}): "
+              f"{worst['false_alarm_events']} events = {worst['false_alarm_events_per_hour']:.1f}/hour")
+        print("  a clean result here is necessary but not sufficient: it says nothing about recall.")
+    elif not any(r["detect_rate"] > 0 for r in rows):
         print("The model raised no alarm on any fire video at any setting in the grid.")
         print("Lower --conf-grid / --hits-grid, or check that the positive videos really contain fire.")
     elif best:
@@ -406,6 +498,22 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"\nwrote {out_dir / 'video_eval.md'}")
+
+    if args.save_alarm_frames:
+        conf_s, hits_s = args.save_alarm_frames.split(",")
+        key = f"conf{float(conf_s)}_hits{int(hits_s)}"
+        if key not in per_video_best:
+            print(f"--save-alarm-frames {args.save_alarm_frames}: that setting is not in the grid; "
+                  f"add it to --conf-grid / --hits-grid.")
+        else:
+            details = per_video_best[key]
+            events = [(name, e) for name, d in details.items() for e in d["events"]]
+            print(f"\nalarm onsets at conf {float(conf_s):.2f}, {int(hits_s)}-of-{args.window}: {len(events)}")
+            for name, e in sorted(events, key=lambda x: (x[0], x[1]["time_s"])):
+                print(f"  {name[:48]:<48} t={e['time_s'] / 60:6.2f} min  {e['class']:<5} {e['score']:.2f}")
+            snap_dir = out_dir / f"alarm_frames_conf{float(conf_s):.2f}_hits{int(hits_s)}"
+            written = save_alarm_frames(records, video_root, details, snap_dir, args.max_snapshots)
+            print(f"wrote {written} annotated snapshot(s) -> {snap_dir}")
 
 
 if __name__ == "__main__":
