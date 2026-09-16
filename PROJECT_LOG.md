@@ -524,6 +524,52 @@ Two corrections:
 
 ---
 
+## 6d. First test on real customer-site footage
+
+Industrial footage from the customer, 3 fixed cameras, 54.5 minutes of normal
+working operation, **no fire**. Kept out of the repository (confidential; this
+repo is public); details and snapshots live only in the ignored `Industry/`
+folder. Scanned locally with the stage-2 model at 1 fps sampling, 15-frame
+confirmation window.
+
+| confidence | enter hits | false alarms | per hour |
+|---|---|---|---|
+| 0.50 | 6 | 19 | 20.9 |
+| 0.60 | 6 | 9 | 9.9 |
+| 0.70 | 6 | 3 | 3.3 |
+| 0.75 | 6 | **0** | **0** |
+| 0.85 | 6 | **0** | **0** |
+| 0.90 | 6 | **0** | **0** |
+
+**At the deployment thresholds (0.85-0.90) there were zero false alarms.**
+The lowest clean setting is 0.75 with 6-of-15. The still-image operating point
+chose 0.90, so there is some real margin.
+
+What fires below that, from the saved snapshots:
+
+- **"smoke" on bright, dusty haze** under roof lighting - large boxes in the
+  same upper region of one camera (0.52-0.69).
+- **"fire" on one small fixed object** in another camera, at the same spot in
+  all three highest-scoring alarms, 15 minutes apart (0.74-0.77).
+
+Both are **stationary**, which is exactly the case temporal confirmation cannot
+filter (see the webcam finding in 6b). The fixes, in preference order:
+
+1. **Hard-negative mining.** Add frames from this footage to training with
+   empty labels. Best fix, since it teaches the model rather than hiding a
+   region. This footage is the only in-domain negative data the project has.
+2. **Per-camera thresholds.** A camera looking at permanent haze can run
+   higher than one that does not.
+3. **Ignore masks - with care.** Masking a small fixed object is fine. Masking
+   the upper region of a shed is not: smoke rises, and that is where it would
+   first appear.
+
+**Limits:** a clean result is necessary but not sufficient. This footage says
+nothing about recall, and 54.5 minutes from 3 cameras is a small sample next to
+70 cameras running around the clock.
+
+---
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
