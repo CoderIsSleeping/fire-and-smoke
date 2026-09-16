@@ -13,3 +13,8 @@ datasets/raw/
 datasets/processed/
 
 output/pdf/*.png
+
+# Client footage - confidential, never commit or push
+Industry/
+*.mov
+*.dav
