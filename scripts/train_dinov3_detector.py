@@ -70,7 +70,13 @@ def parse_args() -> argparse.Namespace:
     model.add_argument("--backbone-weights", default=None, help="Local trunk checkpoint, for offline Kaggle sessions.")
     model.add_argument("--unfreeze-last-n", type=int, default=0, help="Unfreeze the last N trunk blocks (stage 2).")
     model.add_argument("--scene-weight", type=float, default=1.0, help="Weight of the image-level classifier loss.")
-    model.add_argument("--fpn-channels", type=int, default=256)
+    model.add_argument("--fpn-channels", type=int, default=256,
+                       help="Pyramid width. 128 roughly halves head cost; see PROJECT_LOG 6c.")
+    model.add_argument("--head", choices=["frcnn", "fcos"], default="frcnn",
+                       help="frcnn = two-stage (original). fcos = one-stage, exports as a batched "
+                            "ONNX/TensorRT graph, which Faster R-CNN cannot.")
+    model.add_argument("--head-convs", type=int, default=4,
+                       help="Conv layers per FCOS tower (FCOS head only). 2 is the light setting.")
 
     optim = p.add_argument_group("optimisation")
     optim.add_argument("--epochs", type=int, default=40)
@@ -250,7 +256,8 @@ def write_history(history: list[dict], out_dir: Path) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
     ax = axes[0][0]
-    for key in ("train_total", "loss_classifier", "loss_box_reg", "loss_objectness", "loss_rpn_box_reg", "loss_scene"):
+    loss_keys = ["train_total"] + sorted({k for row in history for k in row if k.startswith("loss_")})
+    for key in loss_keys:
         values = [row.get(key) for row in history]
         if any(v is not None for v in values):
             ax.plot(epochs, values, label=key)
@@ -345,6 +352,8 @@ def main() -> None:
         backbone_weights=args.backbone_weights,
         scene_weight=args.scene_weight,
         fpn_channels=args.fpn_channels,
+        head=args.head,
+        head_convs=args.head_convs,
     ).to(device)
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -424,9 +433,14 @@ def main() -> None:
             "scene_fpr_fire": round(scene_at("fire", "fpr"), 5),
             "scene_fpr_smoke": round(scene_at("smoke", "fpr"), 5),
         }
-        for key in ("loss_classifier", "loss_box_reg", "loss_objectness", "loss_rpn_box_reg", "loss_scene"):
-            if key in train_stats:
-                row[key] = round(train_stats[key], 5)
+        # Faster R-CNN and FCOS name their losses differently; record all of them
+        # under a common loss_ prefix so the CSV and plots work for either head.
+        for key, value in train_stats.items():
+            # Bookkeeping, not losses: these are logged in their own columns.
+            if key in ("total", "skipped_batches", "lr"):
+                continue
+            name = key if key.startswith("loss_") else f"loss_{key}"
+            row[name] = round(value, 5)
         history.append(row)
         write_history(history, out_dir)
 

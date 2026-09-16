@@ -34,12 +34,18 @@ import torch
 
 from fire_smoke.dataset import letterbox
 from fire_smoke.glow import glow_features
-from fire_smoke.model import load_detector
+from fire_smoke.model import FireSmokeDetector, load_detector
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Throughput benchmark and camera-capacity planner.")
-    p.add_argument("--weights", required=True)
+    p.add_argument("--weights", default=None,
+                   help="Checkpoint to benchmark. Omit to time an untrained model of the config below -- "
+                        "timing does not depend on the weights, so capacity can be planned before training.")
+    p.add_argument("--backbone", default="vit_small_patch16_dinov3.lvd1689m")
+    p.add_argument("--head", choices=["frcnn", "fcos"], default="frcnn")
+    p.add_argument("--head-convs", type=int, default=4)
+    p.add_argument("--fpn-channels", type=int, default=256)
     p.add_argument("--device", default="auto")
     p.add_argument("--sizes", default="640,512,448", help="Image sizes to sweep (multiples of 64).")
     p.add_argument("--batches", default="1,4,8", help="Batch sizes to sweep.")
@@ -143,11 +149,19 @@ def main() -> None:
     best = None
     for size in sizes:
         for post_nms in proposals:
-            model, _ = load_detector(args.weights, device, image_size=size)
+            if args.weights:
+                model, _ = load_detector(args.weights, device, image_size=size)
+            else:
+                model = FireSmokeDetector(backbone_name=args.backbone, pretrained_backbone=False,
+                                          image_size=size, head=args.head, head_convs=args.head_convs,
+                                          fpn_channels=args.fpn_channels).to(device)
             model.eval()
-            model.detector.rpn._post_nms_top_n = {"training": 2000, "testing": post_nms}
-            model.detector.rpn._pre_nms_top_n = {"training": 2000, "testing": min(2000, post_nms * 4)}
-            model.detector.roi_heads.detections_per_img = 20 if post_nms < 1000 else 50
+            if model.head_type == "frcnn":
+                model.detector.rpn._post_nms_top_n = {"training": 2000, "testing": post_nms}
+                model.detector.rpn._pre_nms_top_n = {"training": 2000, "testing": min(2000, post_nms * 4)}
+                model.detector.roi_heads.detections_per_img = 20 if post_nms < 1000 else 50
+            elif post_nms != proposals[0]:
+                continue  # FCOS has no proposal stage; one pass per size is enough
             for batch in batches:
                 try:
                     fps = measure(model, device, size, batch, args.iters, args.warmup, args.amp)

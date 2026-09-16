@@ -418,6 +418,112 @@ batched GPU worker. A fire alarm on 30-second-old video is worse than no alarm.
 
 ---
 
+## 6c. A lighter, deployable model
+
+Prompted on 2026-09-17 by an external review recommending the standard
+multi-camera path: `DINOv3 -> ONNX -> TensorRT fp16 -> batched inference ->
+DeepStream`. The direction is right. It skipped a blocker, which was measured
+before building anything.
+
+### The blocker: Faster R-CNN cannot be batch-exported
+
+That whole path depends on running many cameras' frames as **one batch**.
+
+| exporter | batch 1 | batch 4 |
+|---|---|---|
+| legacy TorchScript ONNX | works | **fails** in ONNX Runtime (`Split` node: batch size baked in) |
+| `torch.export` (current) | **fails** at step 1 | - |
+
+The cause is structural. Faster R-CNN has a data-dependent middle: the RPN picks
+a variable number of proposals, and RoIAlign crops features for exactly those
+before the box head runs. There is no fixed-shape point at which to cut the
+graph. No amount of TensorRT tuning gets past that.
+
+### The fix: a one-stage FCOS head
+
+FCOS puts every learned layer *before* anything data-dependent. The network
+ends at fixed-shape tensors (`8500` locations at 640 px); decoding and NMS
+happen afterwards. Implemented with torchvision's FCOS, so the loss (focal +
+GIoU + centerness) is well-tested code, not hand-rolled.
+
+`num_classes` stays 3 with an unused background channel, so label ids (1 =
+smoke, 2 = fire) match the old model and every evaluation, video and report
+script works unchanged. Old Faster R-CNN checkpoints still load.
+
+### Measured: the head alone does not make it lighter
+
+At 640 px on CPU, same ViT-S trunk:
+
+| config | ms/frame | params | vs current |
+|---|---|---|---|
+| ViT-S + Faster R-CNN (current) | 884 | 39.3M | 1.00x |
+| ViT-S + FCOS, 4 convs | 1177 | - | 0.86x |
+| ViT-S + FCOS, 2 convs | 924 | 27.2M | 0.96x |
+| ViT-S + FCOS, 2 convs, 128ch pyramid | 746 | 23.2M | 1.19x |
+| **ViT-Ti + FCOS, 2 convs** | **491** | **10.8M** | **1.80x** |
+| **ViT-Ti + FCOS, 2 convs, 128ch pyramid** | **329** | **6.9M** | **2.69x** |
+
+The dense FCOS head convolves every location of the 80x80 map, which costs
+about what Faster R-CNN's sparse RoI head does. **The head swap makes the model
+deployable, not lighter.** The trunk is ~67% of compute, so the real lever is
+the trunk: pretrained DINOv3 ViT-Ti (`vit_tiny_patch16_dinov3_qkvb.eupe_lvd1689m`,
+5.5M params, same normalisation) is available in timm.
+
+Resolution was *not* touched. 640 -> 448 was measured in 6b to cost 24 points
+of recall, and that rule still stands.
+
+### Measured: ONNX Runtime on CPU is not a speedup
+
+Light model, PyTorch vs ONNX Runtime on CPU: ORT runs at **0.71-0.80x**.
+The export's value is as the input to **TensorRT fp16 on a GPU**, where
+batching and fp16 kernels are. That speedup could not be measured on this
+machine and no number is claimed for it.
+
+### Verified before any GPU time was spent
+
+- **It learns.** Overfit on 4 images with real pretrained ViT-Ti weights:
+  loss 3.57 -> 0.55, 4/5 boxes matched at IoU>=0.5 and conf>=0.5, scene head
+  exact. (Faster R-CNN managed 5/5 on the same test.)
+  `bbox_ctrness` plateaus at ~0.49 and never reaches zero. **That is correct**:
+  centerness is BCE against soft targets, so its floor is the targets' own
+  entropy. Not a training failure.
+- **Batched export is exact.** `scripts/export_onnx.py` exports with a dynamic
+  batch and checks two things on every run: raw tensors match (1e-5), and
+  boxes *decoded* from the ONNX outputs match the PyTorch model's own
+  detections - box error 6e-5 px on 80 detections at batch 4. The second check
+  is the one that matters; matching tensors are worthless if decoding is wrong.
+  Detection comparison runs with the score threshold at 0 so it cannot pass
+  vacuously.
+- **The real scripts run end to end**: train -> evaluate -> export, with both
+  heads, and Faster R-CNN's loss columns are unchanged.
+
+### What is not known yet
+
+**Accuracy.** A half-width trunk could cost small-object sensitivity the way
+downscaling did. The light model has to be trained on D-Fire and evaluated on
+the same test split, and accepted only if recall at the ~0.7% FPR operating
+point holds up against the current 0.8748.
+
+### On the external review
+
+Agreed with, and consistent with 6b: sample 2-5 fps per camera rather than
+every frame; batch across cameras; lean on temporal confirmation; benchmark on
+the target GPU before claiming a camera count; describe it as a "scalable
+architecture" rather than asserting 70-camera capacity.
+
+Two corrections:
+
+- The `3/8` temporal setting was a webcam test value chosen for a ~1 fps CPU
+  loop. Deployment defaults are `6-of-15` at conf 0.85-0.90. The review's
+  example of hits at 0.42-0.51 raising an alarm would not happen at deployment
+  thresholds.
+- DeepStream consumes a TensorRT engine through `nvinfer`, which needs a custom
+  output parser for a two-head FCOS + scene model. That is real engineering. A
+  Python batching service over ONNX Runtime-GPU or TensorRT is the realistic
+  project-stage target; DeepStream is the production target.
+
+---
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed

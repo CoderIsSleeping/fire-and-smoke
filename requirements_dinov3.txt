@@ -13,3 +13,8 @@ pillow
 matplotlib
 pandas
 tqdm
+
+# Export and verification (scripts/export_onnx.py)
+onnx
+onnxruntime
+onnxscript
