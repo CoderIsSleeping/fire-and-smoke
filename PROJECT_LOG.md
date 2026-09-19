@@ -549,20 +549,29 @@ What fires below that, from the saved snapshots:
 
 - **"smoke" on bright, dusty haze** under roof lighting - large boxes in the
   same upper region of one camera (0.52-0.69).
-- **"fire" on one small fixed object** in another camera, at the same spot in
-  all three highest-scoring alarms, 15 minutes apart (0.74-0.77).
+- **"fire" on a worker's yellow hard hat** in another camera - a second
+  worker crouching in roughly the same place, so the three highest-scoring
+  alarms (0.74-0.77) land on the same spot 15 minutes apart. First read as a
+  fixed object; the side-by-side demo frame (2026-09-19) showed it is a helmet.
 
 Both are **stationary**, which is exactly the case temporal confirmation cannot
-filter (see the webcam finding in 6b). The fixes, in preference order:
+filter (see the webcam finding in 6b).
+
+The hard hat matters most, because it generalises: every industrial camera sees
+yellow and orange helmets and hi-vis vests. It is the highest-scoring false
+positive in the footage, still below the 0.85 threshold, and it is a confuser
+class the model must learn rather than a location to hide. The fixes, in
+preference order:
 
 1. **Hard-negative mining.** Add frames from this footage to training with
    empty labels. Best fix, since it teaches the model rather than hiding a
    region. This footage is the only in-domain negative data the project has.
 2. **Per-camera thresholds.** A camera looking at permanent haze can run
    higher than one that does not.
-3. **Ignore masks - with care.** Masking a small fixed object is fine. Masking
-   the upper region of a shed is not: smoke rises, and that is where it would
-   first appear.
+3. **Ignore masks - rarely.** Not for the hard hat: people work there, and a
+   mask would hide a real fire at the same spot. Not for the upper region of a
+   shed either: smoke rises, and that is where it would first appear. Masks are
+   for genuinely permanent hot or bright fixtures only.
 
 **Limits:** a clean result is necessary but not sufficient. This footage says
 nothing about recall, and 54.5 minutes from 3 cameras is a small sample next to
