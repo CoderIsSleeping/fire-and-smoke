@@ -83,6 +83,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--show", action="store_true",
                    help="Display a live annotated window (press q to stop). Needed for webcam testing.")
     p.add_argument("--no-save", action="store_true", help="Do not write an output video (use with --show).")
+    p.add_argument("--label", default=None,
+                   help="Name shown on screen, e.g. 'Model 1'. The architecture and speed are added automatically.")
     return p.parse_args()
 
 
@@ -273,6 +275,14 @@ def main() -> None:
     overrides = {"image_size": args.imgsz} if args.imgsz else {}
     model, _ = load_detector(args.weights, device, **overrides)
     image_size = model.config["image_size"]
+
+    # On-screen identity, read from the checkpoint so it cannot be mislabelled.
+    trunk_name = model.config.get("backbone_name", "")
+    trunk = "ViT-Ti" if "tiny" in trunk_name else "ViT-S" if "small" in trunk_name else trunk_name.split(".")[0]
+    head = "FCOS" if model.config.get("head") == "fcos" else "Faster R-CNN"
+    params = sum(p.numel() for p in model.parameters()) / 1e6
+    title = f"{args.label + ':  ' if args.label else ''}DINOv3 {trunk} + {head}  ({params:.1f}M)"
+    latencies: list[float] = []
     use_amp = args.amp and device.type == "cuda"
 
     is_live = args.source.isdigit()
@@ -363,8 +373,12 @@ def main() -> None:
 
             glow_vector = torch.from_numpy(glow_features(canvas)[None, :]).to(device)
 
+            infer_started = time.perf_counter()
             with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
                 detections, scene_probs = model([tensor], glow=glow_vector)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            latencies.append(time.perf_counter() - infer_started)
 
             detection = detections[0]
             boxes = detection["boxes"].float().cpu().numpy()
@@ -437,7 +451,10 @@ def main() -> None:
             draw_label(frame, f"POSSIBLE OCCLUDED FIRE (glow {last_glow[1]:.2f})",
                        (last_glow[0][0], last_glow[0][1] - 6), GLOW_COLOR, 0.55)
 
+        recent = latencies[-20:]
+        ms = 1000.0 * sum(recent) / len(recent) if recent else 0.0
         status = [
+            (f"{title}   |   {ms:.0f} ms/frame   |   alarm at conf >= {args.conf:.2f}", (0, 220, 255)),
             (f"t={timestamp:6.1f}s  frame {frame_index}"
              + (f"  {frame_index / max(timestamp, 1e-6):4.1f} fps"
                 f"  dropped {reader.dropped}" if is_live else ""), (255, 255, 255)),
