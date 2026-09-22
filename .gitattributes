@@ -7,3 +7,4 @@
 *.onnx binary
 *.zip binary
 *.bat text eol=crlf
+*.pptx binary
