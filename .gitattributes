@@ -1,0 +1,9 @@
+# Never line-ending-convert binary files (core.autocrlf is on for this repo).
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pt binary
+*.onnx binary
+*.zip binary
+*.bat text eol=crlf
