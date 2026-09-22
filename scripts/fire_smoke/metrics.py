@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import numpy as np
 
-DEFAULT_THRESHOLDS = tuple(round(x, 3) for x in np.arange(0.05, 1.00, 0.05))
+# 0.025 steps, not 0.05: the FCOS head compresses its scores into a narrow band,
+# and at 0.05 steps a single step moved the light model's recall by 14 points,
+# so the operating point it picked was far from the best one available.
+DEFAULT_THRESHOLDS = tuple(round(x, 3) for x in np.arange(0.05, 0.976, 0.025))
 COCO_IOUS = tuple(round(x, 2) for x in np.arange(0.5, 1.0, 0.05))
 
 

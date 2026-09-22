@@ -72,6 +72,15 @@ def create_trunk(model_name: str, pretrained: bool, local_weights: str | None = 
     """
     import timm
 
+    # A checkpoint can record its trunk as "hf_hub:timm/<name>". Rebuilding from
+    # that string makes timm fetch the config from the Hub even when no weights
+    # are needed, so a trained model would fail to load offline -- say, at a
+    # demo. timm already knows these models by their plain name.
+    if model_name.startswith("hf_hub:timm/"):
+        plain = model_name.split("/", 1)[1]
+        if timm.is_model(plain.split(".")[0]):
+            model_name = plain
+
     load_from_hub = pretrained and local_weights is None
     trunk = timm.create_model(model_name, pretrained=load_from_hub, num_classes=0)
 

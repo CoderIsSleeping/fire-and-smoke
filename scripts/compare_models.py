@@ -10,6 +10,13 @@ detected, whether its alarm is up, and how long it took per frame.
         --model "Model 2: ViT-Ti + FCOS (light)=runs/light/best.pt" \
         --video site.mov --output compare.mp4 --max-seconds 120
 
+Each model gets its own alarm threshold via LABEL=WEIGHTS@CONF. This matters:
+the FCOS head scores sqrt(classification x centerness), so its confidences
+cluster far lower than Faster R-CNN's -- the trained light model never scores
+above ~0.75, and at a shared threshold of 0.85 it would simply never alarm.
+Compare models at their own operating points (matched false-alarm rate on the
+test split), not at a shared number.
+
 Latency is measured per model on the machine running this script. On a CPU the
 absolute numbers are slow; the ratio between the models is what carries over.
 
@@ -37,7 +44,7 @@ from fire_smoke.dataset import letterbox, undo_letterbox
 from fire_smoke.glow import glow_features
 from fire_smoke.model import load_detector
 from fire_smoke.temporal import TemporalConfirmer
-from predict_video_dinov3 import clean_boxes, draw_label, resolve_fps
+from predict_video_dinov3 import LatestFrameReader, clean_boxes, draw_label, open_source, resolve_fps
 
 BOX_COLOURS = {1: (200, 200, 200), 2: (0, 140, 255)}
 ALARM_COLOUR = (0, 0, 235)
@@ -46,9 +53,14 @@ PANEL_TINTS = [(120, 70, 20), (20, 110, 40), (110, 30, 110), (30, 90, 140)]
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Side-by-side comparison of models on one video.")
-    p.add_argument("--model", action="append", required=True, metavar="LABEL=WEIGHTS",
-                   help="Repeat for each model, in the order to show them. LABEL is optional.")
-    p.add_argument("--video", required=True)
+    p.add_argument("--model", action="append", required=True, metavar="LABEL=WEIGHTS[@CONF]",
+                   help="Repeat for each model, in the order to show them. LABEL is optional. "
+                        "@CONF sets that model's own alarm threshold -- use each model's operating "
+                        "point from its test evaluation, because different heads score on different "
+                        "scales (see module docstring).")
+    p.add_argument("--video", required=True, help="Video file, or a camera index such as 0 for the webcam.")
+    p.add_argument("--show", action="store_true", help="Show the comparison live in a window (q to quit).")
+    p.add_argument("--no-save", action="store_true", help="Do not write an output video.")
     p.add_argument("--output", default="model_comparison.mp4")
     p.add_argument("--device", default="auto")
     p.add_argument("--stride", type=int, default=5, help="Run the models every Nth frame.")
@@ -57,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--panel-width", type=int, default=960)
     p.add_argument("--layout", choices=["row", "column"], default="row")
 
-    alarm = p.add_argument_group("alarm settings (identical for every model, so the comparison is fair)")
+    alarm = p.add_argument_group("alarm settings (defaults; give each model its own threshold with @CONF)")
     alarm.add_argument("--conf", type=float, default=0.85)
     alarm.add_argument("--exit-conf", type=float, default=0.70)
     alarm.add_argument("--window", type=int, default=15)
@@ -88,8 +100,9 @@ def describe(model) -> str:
 class Runner:
     """One model plus its own alarm state and running statistics."""
 
-    def __init__(self, label: str, weights: str, device, args) -> None:
+    def __init__(self, label: str, weights: str, device, args, conf: float | None = None) -> None:
         self.label = label
+        self.conf = args.conf if conf is None else conf
         self.model, checkpoint = load_detector(weights, device)
         self.model.eval()
         self.device = device
@@ -97,7 +110,8 @@ class Runner:
         self.summary = describe(self.model)
         self.confirmer = TemporalConfirmer(
             class_names={1: "smoke", 2: "fire"}, window=args.window, enter_hits=args.enter_hits,
-            exit_hits=args.exit_hits, enter_conf=args.conf, exit_conf=args.exit_conf,
+            exit_hits=args.exit_hits, enter_conf=self.conf,
+            exit_conf=min(args.exit_conf, self.conf - 0.15) if conf is not None else args.exit_conf,
         )
         self.latencies: list[float] = []
         self.detections = (np.zeros((0, 4), np.float32), np.zeros(0, np.float32), np.zeros(0, np.int64))
@@ -161,7 +175,8 @@ def render_panel(frame, runner: Runner, index: int, tint, args, panel_w: int) ->
     # Header: which model this is, read from its checkpoint.
     cv2.rectangle(panel, (0, 0), (w, 58), tint, -1)
     cv2.putText(panel, runner.label, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(panel, runner.summary, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (235, 235, 235), 1, cv2.LINE_AA)
+    cv2.putText(panel, f"{runner.summary}  |  alarm at conf >= {runner.conf:.2f}", (12, 48),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (235, 235, 235), 1, cv2.LINE_AA)
 
     # Footer: live speed and alarm count.
     cv2.rectangle(panel, (0, h - 34), (w, h), (0, 0, 0), -1)
@@ -186,60 +201,87 @@ def main() -> None:
 
     runners = []
     for position, spec in enumerate(args.model, start=1):
-        label, _, weights = spec.rpartition("=")
+        label, _, rest = spec.rpartition("=")
         label = label or f"Model {position}"
+        conf = None
+        if "@" in rest and not Path(rest).exists():
+            rest, _, conf_text = rest.rpartition("@")
+            conf = float(conf_text)
+        weights = rest
         if not Path(weights).exists():
             raise SystemExit(f"weights not found for {label!r}: {weights}")
-        runner = Runner(label, weights, device, args)
+        runner = Runner(label, weights, device, args, conf)
         runners.append(runner)
-        print(f"[{position}] {label}\n    {runner.summary}  (checkpoint epoch {runner.epoch})")
+        print(f"[{position}] {label}\n    {runner.summary}  alarm conf >= {runner.conf:.2f}  (checkpoint epoch {runner.epoch})")
 
-    capture = cv2.VideoCapture(args.video)
+    is_live = args.video.isdigit()
+    capture = open_source(args.video)
     if not capture.isOpened():
         raise SystemExit(f"Could not open {args.video}")
-    fps = resolve_fps(capture, is_live=False)
-    total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    start = int(args.start_seconds * fps)
-    stop = start + int(args.max_seconds * fps) if args.max_seconds else total
-
-    # Skip ahead by reading, not seeking: CCTV exports use long GOPs and a seek
-    # lands on frames the decoder cannot reconstruct.
-    for _ in range(start):
-        if not capture.grab():
-            break
+    fps = resolve_fps(capture, is_live=is_live)
+    if is_live:
+        # A webcam produces frames faster than two models can process them;
+        # always work on the newest frame rather than falling behind.
+        reader = LatestFrameReader(capture)
+        start, stop = 0, float("inf")
+        if args.max_seconds:
+            stop = int(args.max_seconds * fps)
+    else:
+        reader = capture
+        total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        start = int(args.start_seconds * fps)
+        stop = start + int(args.max_seconds * fps) if args.max_seconds else total
+        # Skip ahead by reading, not seeking: CCTV exports use long GOPs and a
+        # seek lands on frames the decoder cannot reconstruct.
+        for _ in range(start):
+            if not capture.grab():
+                break
+    wall_start = time.time()
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     writer = None
     index = start
-    progress = tqdm(total=max(0, stop - start) or None, desc="frames")
+    progress = tqdm(total=None if is_live else (max(0, stop - start) or None), desc="frames")
 
     while index < stop:
-        ok, frame = capture.read()
+        ok, frame = reader.read()
         if not ok:
             break
-        if (index - start) % args.stride == 0:
+        if is_live or (index - start) % args.stride == 0:
             for runner in runners:
                 runner.step(frame)
 
         panels = [render_panel(frame, r, index, PANEL_TINTS[i % len(PANEL_TINTS)], args, args.panel_width)
                   for i, r in enumerate(runners)]
         sheet = np.hstack(panels) if args.layout == "row" else np.vstack(panels)
-        if writer is None:
-            writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps,
-                                     (sheet.shape[1], sheet.shape[0]))
-        writer.write(sheet)
+        if writer is None and not args.no_save:
+            writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                                     2.0 if is_live else fps, (sheet.shape[1], sheet.shape[0]))
+        if writer is not None:
+            writer.write(sheet)
+        if args.show:
+            cv2.imshow("Model comparison  -  press q to quit", sheet)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
         index += 1
         progress.update(1)
 
     progress.close()
-    capture.release()
+    if is_live:
+        reader.release()
+    else:
+        capture.release()
     if writer is not None:
         writer.release()
+    if args.show:
+        cv2.destroyAllWindows()
 
-    seconds = (index - start) / fps
+    seconds = (time.time() - wall_start) if is_live else (index - start) / fps
+    if not runners[0].latencies:
+        raise SystemExit("no frames were processed")
     print(f"\ncompared on {seconds:.1f}s of {Path(args.video).name}, "
-          f"model run every {args.stride} frames, alarm at conf>={args.conf} {args.enter_hits}-of-{args.window}")
+          f"model run every {args.stride} frames, alarm {args.enter_hits}-of-{args.window} at each model's own conf")
     header = f"{'model':<44} {'ms/frame':>9} {'alarms':>7} {'alarms/hour':>12}"
     print(header)
     print("-" * len(header))
@@ -251,7 +293,8 @@ def main() -> None:
         per_hour = runner.alarm_events / max(seconds / 3600.0, 1e-9)
         print(f"{runner.label[:44]:<44} {ms:>9.0f} {runner.alarm_events:>7d} {per_hour:>12.1f}"
               + (f"   ({base / ms:.2f}x vs first)" if ms and runner is not runners[0] else ""))
-        rows.append({"model": runner.label, "architecture": runner.summary, "ms_per_frame": round(ms, 1),
+        rows.append({"model": runner.label, "architecture": runner.summary, "alarm_conf": runner.conf,
+                     "ms_per_frame": round(ms, 1),
                      "alarm_events": runner.alarm_events, "alarms_per_hour": round(per_hour, 2),
                      "seconds_compared": round(seconds, 1)})
 
@@ -260,7 +303,9 @@ def main() -> None:
         writer_csv = csv.DictWriter(f, fieldnames=list(rows[0]))
         writer_csv.writeheader()
         writer_csv.writerows(rows)
-    print(f"\nwrote {out_path}\nwrote {summary_path}")
+    if writer is not None:
+        print(f"\nwrote {out_path}")
+    print(f"wrote {summary_path}")
 
 
 if __name__ == "__main__":
