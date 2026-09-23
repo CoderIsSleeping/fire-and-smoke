@@ -1,0 +1,149 @@
+{
+  "label": "hf_hub:timm/vit_tiny_patch16_dinov3_qkvb.eupe_lvd1689m + fcos",
+  "weights": "models/model2_vitTi_fcos_light.pt",
+  "checkpoint_epoch": 44,
+  "config": {
+    "backbone_name": "hf_hub:timm/vit_tiny_patch16_dinov3_qkvb.eupe_lvd1689m",
+    "image_size": 640,
+    "unfreeze_last_n": 0,
+    "scene_weight": 1.0,
+    "fpn_channels": 128,
+    "head": "fcos",
+    "head_convs": 2,
+    "class_names": [
+      "__background__",
+      "smoke",
+      "fire"
+    ],
+    "scene_classes": [
+      "smoke",
+      "fire"
+    ]
+  },
+  "totals": {
+    "total_params": 6947224,
+    "trainable_params": 1457560
+  },
+  "sections": {
+    "dinov3_trunk": {
+      "present": true,
+      "total_params": 5489664,
+      "trainable_params": 0,
+      "layer_counts": {
+        "Identity": 76,
+        "Dropout": 50,
+        "Linear": 48,
+        "LayerNorm": 25,
+        "GELU": 12,
+        "Conv2d": 1,
+        "RotaryEmbeddingDinoV3": 1
+      }
+    },
+    "feature_pyramid": {
+      "present": true,
+      "total_params": 6244992,
+      "trainable_params": 755328,
+      "layer_counts": {
+        "Identity": 76,
+        "Dropout": 50,
+        "Linear": 48,
+        "LayerNorm": 25,
+        "GELU": 12,
+        "Conv2d": 9,
+        "LayerNorm2d": 4,
+        "MaxPool2d": 2,
+        "RotaryEmbeddingDinoV3": 1,
+        "ConvTranspose2d": 1
+      }
+    },
+    "detection_head": {
+      "present": true,
+      "total_params": 6845576,
+      "trainable_params": 1355912,
+      "layer_counts": {
+        "Identity": 76,
+        "Dropout": 50,
+        "Linear": 48,
+        "LayerNorm": 25,
+        "Conv2d": 16,
+        "GELU": 12,
+        "LayerNorm2d": 4,
+        "GroupNorm": 4,
+        "ReLU": 4,
+        "MaxPool2d": 2,
+        "RotaryEmbeddingDinoV3": 1,
+        "ConvTranspose2d": 1,
+        "AnchorGenerator": 1,
+        "GeneralizedRCNNTransform": 1
+      }
+    },
+    "scene_head": {
+      "present": true,
+      "total_params": 101648,
+      "trainable_params": 101648,
+      "layer_counts": {
+        "Linear": 2,
+        "LayerNorm": 1,
+        "GELU": 1,
+        "Dropout": 1
+      }
+    },
+    "feature_pyramid_only": {
+      "layer_counts": {
+        "Conv2d": 8,
+        "LayerNorm2d": 4,
+        "MaxPool2d": 2,
+        "ConvTranspose2d": 1
+      },
+      "trainable_params": 755328
+    }
+  },
+  "transformer_trunk_detail": {
+    "num_blocks": 12,
+    "embed_dim": 192,
+    "num_heads_per_block": 3,
+    "head_dim": 64,
+    "mlp_hidden_dim": 768,
+    "patch_size": [
+      16,
+      16
+    ],
+    "block_type": "EvaBlock",
+    "per_block_layers": {
+      "LayerNorm": 2,
+      "Linear (qkv)": 1,
+      "Linear (attn proj)": 1,
+      "Linear (mlp fc1)": 1,
+      "Linear (mlp fc2)": 1,
+      "GELU": 1
+    }
+  },
+  "fcos_head_detail": {
+    "num_convs_per_tower": 2,
+    "classification_tower": {
+      "total_params": 299139,
+      "trainable_params": 299139,
+      "layer_counts": {
+        "Conv2d": 3,
+        "GroupNorm": 2,
+        "ReLU": 2
+      }
+    },
+    "regression_tower": {
+      "total_params": 301445,
+      "trainable_params": 301445,
+      "layer_counts": {
+        "Conv2d": 4,
+        "GroupNorm": 2,
+        "ReLU": 2
+      }
+    }
+  },
+  "disjoint_param_breakdown": {
+    "dinov3_trunk": 5489664,
+    "feature_pyramid_neck": 755328,
+    "scene_head": 101648,
+    "fcos_head": 600584,
+    "sum_check": 6947224
+  }
+}
