@@ -22,7 +22,7 @@ REQUIRED = ["torch", "torchvision", "timm", "cv2", "yaml", "numpy", "PIL", "matp
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Check that everything needed for training is in place.")
     p.add_argument("--data", default=None, help="Path to data.yaml (auto-detected if omitted).")
-    p.add_argument("--backbone", default="vit_small_patch16_dinov3.lvd1689m")
+    p.add_argument("--backbone", default="mobilenetv3_large_100.ra_in1k")
     p.add_argument("--check-backbone", action="store_true", help="Actually try to build the pretrained trunk.")
     return p.parse_args()
 
