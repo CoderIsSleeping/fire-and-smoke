@@ -294,7 +294,7 @@ def write_history(history: list[dict], out_dir: Path) -> None:
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
 
-    fig.suptitle("DINOv3 fire / smoke detector")
+    fig.suptitle("Fire / smoke detector")
     fig.tight_layout()
     fig.savefig(out_dir / "results.png", dpi=150)
     plt.close(fig)

@@ -630,6 +630,50 @@ first:
    Model 1's speed; if accuracy holds, the speed can come from TensorRT and
    batching rather than a smaller trunk.
 
+## 6f. CNN baselines: ResNet-18 and MobileNetV3-Large
+
+The question a reviewer will ask: *does DINOv3 actually earn its place, or would
+an ordinary ImageNet CNN do as well?* To answer it, the same detector was built
+on two CNN backbones, each on its own branch:
+
+| Branch | Backbone (timm) | Total params | Trainable, stage 1 | Trunk trainable, stage 2 |
+|---|---|---|---|---|
+| `main` | DINOv3 ViT-S/16 (`vit_small_patch16_dinov3.lvd1689m`) | 39.3M | 17.7M | last 2 blocks, 3.5M |
+| `backbone-resnet18` | ResNet-18 (`resnet18.tv_in1k`) | 27.9M | 16.8M | layer3 + layer4, 10.5M |
+| `backbone-mobilenetv3` | MobileNetV3-Large (`mobilenetv3_large_100.ra_in1k`) | 20.0M | 17.1M | blocks 5 + 6, 2.2M |
+
+**Only the backbone changes.** Faster R-CNN head (same anchors, RoIAlign
+levels, proposal counts), scene head + glow prior, augmentation, optimizer,
+schedule, early stopping and the two-stage protocol (frozen trunk, then last 2
+stages unfrozen at lr 5e-5) are identical, so the comparison isolates the
+backbone.
+
+**What differs inside the backbone, and why:**
+- A CNN is already hierarchical, so the ViTDet-style resampling is replaced by a
+  standard FPN on the stride-8/16/32 stages (C3, C4, C5); P6 is a stride-2
+  max-pool of P5, as in torchvision's Faster R-CNN. Output names and strides
+  (p3..p6 at 8/16/32/64) are unchanged.
+- Trunk BatchNorm is frozen (timm `freeze_batch_norm_2d`), the torchvision
+  detection default: batch 8 cannot re-estimate ImageNet statistics.
+- `--unfreeze-last-n` counts stages (ResNet `layer1..4`, MobileNetV3
+  `blocks.0..6`) instead of transformer blocks.
+- The scene head reads mean+max pooled C5 (1024-d for ResNet-18, 1920-d for
+  MobileNetV3) instead of pooled ViT tokens (768-d).
+
+Most trainable parameters sit in the Faster R-CNN box head (~13M in the
+two-layer MLP), which is why stage-1 trainable counts are close across all
+three.
+
+**Known caveat:** the shared protocol trains trunks at lr x0.05, which was chosen
+for DINOv3. ImageNet CNNs usually want more fine-tuning than a self-supervised
+ViT, so stage 2 is the fair number to compare; a CNN falling short at stage 1 is
+expected and says "frozen ImageNet features are weaker", not "the CNN cannot
+do it".
+
+Verified locally before any GPU time: build, training step, 1-epoch run on 16
+real images, stage-2 `--init-from`, save/reload and `eval_dinov3_detector.py`
+all work for both backbones.
+
 ---
 
 ## 7. Change log

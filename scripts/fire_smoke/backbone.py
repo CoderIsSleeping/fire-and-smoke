@@ -231,6 +231,136 @@ class DinoPyramidBackbone(nn.Module):
         return out
 
 
+def is_cnn_backbone(model_name: str) -> bool:
+    """True for the CNN baselines (ResNet, MobileNet); False for DINOv3 ViTs."""
+    plain = model_name.split("/", 1)[-1].lower()
+    return plain.startswith(("resnet", "mobilenet"))
+
+
+class CnnPyramidBackbone(nn.Module):
+    """ImageNet CNN trunk (ResNet-18, MobileNetV3-Large) + a standard FPN.
+
+    The CNN baselines the DINOv3 model is compared against. Everything after
+    the backbone -- Faster R-CNN head, scene head, glow prior, augmentation,
+    training schedule -- is identical, so a difference in results is a
+    difference in backbone and nothing else.
+
+    A CNN is already hierarchical, so there is no ViTDet-style resampling:
+    the stride-8 / 16 / 32 stages (C3, C4, C5) go through a normal FPN
+    (Lin et al. 2017), and P6 is a stride-2 max-pool of P5, exactly as in
+    torchvision's own Faster R-CNN. The output names and strides match
+    `DinoPyramidBackbone`, so the anchors and RoIAlign levels are unchanged.
+
+    BatchNorm in the trunk is replaced by FrozenBatchNorm2d, the torchvision
+    detection default: batches of 8 are far too small to re-estimate
+    ImageNet statistics, and frozen statistics keep validation-loss
+    computation in train() mode side-effect free, same as the ViT path.
+
+    `unfreeze_last_n` counts trunk stages from the end (ResNet: layer1..4;
+    MobileNetV3: blocks.0..6), mirroring "last N blocks" on the ViT.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        pretrained: bool = True,
+        out_channels: int = 256,
+        unfreeze_last_n: int = 0,
+        local_weights: str | None = None,
+    ) -> None:
+        super().__init__()
+        import timm
+        from torchvision.ops import FeaturePyramidNetwork
+        from timm.layers import freeze_batch_norm_2d
+
+        self.model_name = model_name
+        if model_name.startswith("hf_hub:timm/"):
+            model_name = model_name.split("/", 1)[1]
+
+        load_from_hub = pretrained and local_weights is None
+        probe = timm.create_model(model_name, pretrained=False, features_only=True)
+        reductions = probe.feature_info.reduction()
+        # The stages at strides 8 / 16 / 32 feed P3 / P4 / P5.
+        indices = tuple(reductions.index(s) for s in (8, 16, 32))
+        del probe
+        self.trunk = timm.create_model(model_name, pretrained=load_from_hub, features_only=True,
+                                       out_indices=indices)
+        if local_weights:
+            state = torch.load(str(local_weights), map_location="cpu")
+            for key in ("model", "state_dict", "model_state_dict"):
+                if isinstance(state, dict) and key in state:
+                    state = state[key]
+                    break
+            missing, unexpected = self.trunk.load_state_dict(state, strict=False)
+            print(f"backbone weights loaded from {local_weights} "
+                  f"({len(missing)} missing, {len(unexpected)} unexpected keys)")
+        # Handles timm's fused BatchNormAct2d (MobileNetV3) as well as plain BN.
+        self.trunk = freeze_batch_norm_2d(self.trunk)
+
+        channels = self.trunk.feature_info.channels()
+        self.trunk_dim = channels[-1]
+        self.out_channels = out_channels
+        self.unfreeze_last_n = unfreeze_last_n
+        self.frozen = unfreeze_last_n <= 0
+        self._freeze_trunk(unfreeze_last_n)
+
+        # No extra_blocks: P6 is pooled here so the names stay p3..p6.
+        self.fpn = FeaturePyramidNetwork(channels, out_channels)
+        self.p6_pool = nn.MaxPool2d(kernel_size=1, stride=2)
+        self.last_pooled: torch.Tensor | None = None
+
+    def stages(self) -> list[nn.Module]:
+        """Trunk stages in forward order, at the granularity unfreezing uses."""
+        units = []
+        for name, child in self.trunk.named_children():
+            if name == "blocks" and isinstance(child, nn.Sequential):
+                units.extend(child.children())
+            elif any(True for _ in child.parameters()):
+                units.append(child)
+        return units
+
+    def _freeze_trunk(self, unfreeze_last_n: int) -> None:
+        for param in self.trunk.parameters():
+            param.requires_grad_(False)
+        if unfreeze_last_n > 0:
+            for stage in self.stages()[-unfreeze_last_n:]:
+                for param in stage.parameters():
+                    param.requires_grad_(True)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.frozen:
+            self.trunk.eval()
+        return self
+
+    def trunk_parameters(self):
+        return [p for p in self.trunk.parameters() if p.requires_grad]
+
+    def neck_parameters(self):
+        return list(self.fpn.parameters())
+
+    def forward(self, x: torch.Tensor) -> "OrderedDict[str, torch.Tensor]":
+        if self.frozen:
+            with torch.no_grad():
+                feats = [f.detach() for f in self.trunk(x)]
+        else:
+            feats = self.trunk(x)
+
+        deepest = feats[-1]
+        self.last_pooled = torch.cat([deepest.mean(dim=(2, 3)), deepest.amax(dim=(2, 3))], dim=1)
+
+        pyramid = self.fpn(OrderedDict(zip(PYRAMID_NAMES[:3], feats)))
+        pyramid["p6"] = self.p6_pool(pyramid["p5"])
+        return pyramid
+
+
+def build_backbone(model_name: str, **kwargs) -> nn.Module:
+    """DINOv3 ViT or CNN baseline, chosen by the model name."""
+    if is_cnn_backbone(model_name):
+        return CnnPyramidBackbone(model_name, **kwargs)
+    return DinoPyramidBackbone(model_name, **kwargs)
+
+
 class SceneHead(nn.Module):
     """Image-level fire / smoke classifier on top of the pooled DINOv3 tokens.
 
