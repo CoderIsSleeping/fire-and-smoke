@@ -664,11 +664,13 @@ Most trainable parameters sit in the Faster R-CNN box head (~13M in the
 two-layer MLP), which is why stage-1 trainable counts are close across all
 three.
 
-**Known caveat:** the shared protocol trains trunks at lr x0.05, which was chosen
-for DINOv3. ImageNet CNNs usually want more fine-tuning than a self-supervised
-ViT, so stage 2 is the fair number to compare; a CNN falling short at stage 1 is
-expected and says "frozen ImageNet features are weaker", not "the CNN cannot
-do it".
+**Comparison point: stage 1 (frozen backbone).** Decision:
+all three backbones are compared at stage 1 -- DINOv3 ViT-S stage 1
+(test mAP@0.5 0.7196) against ResNet-18 and MobileNetV3-Large stage 1, same
+40-epoch schedule. With the trunk frozen, this is a direct test of how good
+each backbone's pretrained features are for fire and smoke, which is the
+question DINOv3 was chosen to answer. Stage 2 stays available on these
+branches but is not part of this comparison.
 
 Verified locally before any GPU time: build, training step, 1-epoch run on 16
 real images, stage-2 `--init-from`, save/reload and `eval_dinov3_detector.py`
