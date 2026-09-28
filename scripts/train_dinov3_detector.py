@@ -37,7 +37,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from fire_smoke import CLASS_NAMES
-from fire_smoke.backbone import DEFAULT_BACKBONE
 from fire_smoke.dataset import (
     AugmentConfig,
     FireSmokeDataset,
@@ -66,7 +65,8 @@ def parse_args() -> argparse.Namespace:
     data.add_argument("--max-val-images", type=int, default=0, help="Subsample the val split (0 = all).")
 
     model = p.add_argument_group("model")
-    model.add_argument("--backbone", default=DEFAULT_BACKBONE)
+    # This branch trains the ResNet-18 baseline; pass --backbone to override.
+    model.add_argument("--backbone", default="resnet18.tv_in1k")
     model.add_argument("--backbone-weights", default=None, help="Local trunk checkpoint, for offline Kaggle sessions.")
     model.add_argument("--unfreeze-last-n", type=int, default=0, help="Unfreeze the last N trunk blocks (stage 2).")
     model.add_argument("--scene-weight", type=float, default=1.0, help="Weight of the image-level classifier loss.")
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--amp", dest="amp", action="store_true", default=None)
     run.add_argument("--no-amp", dest="amp", action="store_false")
     run.add_argument("--output", default=None, help="Run directory (defaults to a Kaggle-aware path).")
-    run.add_argument("--name", default="dinov3_fire_smoke")
+    run.add_argument("--name", default="resnet18")
     run.add_argument("--resume", default=None,
                      help="Continue an interrupted run from last.pt (restores optimizer, epoch and history).")
     run.add_argument("--init-from", default=None,
