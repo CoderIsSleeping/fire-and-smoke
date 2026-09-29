@@ -674,12 +674,12 @@ Test split (4,306 images, 2,005 verified negatives):
 | **DINOv3 ViT-S/16** (stage 1) | **0.7196** | **0.8050** | **0.6342** | 0.70% | 0.848 |
 | MobileNetV3-Large | 0.6968 | 0.7786 | 0.6150 | 0.60% | 0.834 |
 | DINOv3 ViT-Ti + FCOS (Model 2) | 0.6125 | 0.7158 | 0.5092 | - | 0.763 @ 0.7% (interpolated) |
-| ResNet-18 | pending | | | | |
+| ResNet-18 | 0.6477 | 0.7177 | 0.5778 | 0.65% | 0.729 |
 
 On test the DINOv3 lead shrinks slightly (2.3 mAP vs 2.6 on val) and the two
 are close at the alarm operating point (1.4 pts recall apart at similar FPR).
-The ResNet-18 test eval stalled on Kaggle and is still to be run; it is the
-least important of the three given its validation result.
+ResNet-18 confirms its validation result on test: 4.9 mAP behind MobileNetV3
+and 10.5 pts lower recall at the 0.90 threshold, while also slower on CPU.
 Decision taken: DINOv3 continues to stage 3 (2 vs 4 unfrozen blocks, run in
 parallel from the stage-2 best weights).
 
