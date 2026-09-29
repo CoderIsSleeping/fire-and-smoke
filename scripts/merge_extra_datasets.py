@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
                    help="Cap on box-free images kept per source (-1 = same as positives, 0 = none).")
     p.add_argument("--only-with-fire", action="store_true",
                    help="Keep positives only if they contain fire (use to fix the fire/smoke image imbalance).")
-    p.add_argument("--copy-base", action="store_true", help="Copy base files instead of hard-linking them.")
+    p.add_argument("--copy-base", action="store_true", help="Copy base files instead of linking them.")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
@@ -261,11 +261,16 @@ def link_or_copy(src: Path, dst: Path, copy: bool) -> None:
     if dst.exists():
         return
     if not copy:
-        try:
-            os.link(src, dst)
-            return
-        except OSError:
-            pass
+        # Hard link first, then symlink: /kaggle/input is a different
+        # filesystem from /kaggle/working, so hard links fail there, and
+        # copying the base dataset byte by byte was measured at ~33 minutes.
+        # A symlink is instant and reads the same.
+        for make_link in (os.link, os.symlink):
+            try:
+                make_link(src, dst)
+                return
+            except (OSError, NotImplementedError):
+                pass
     shutil.copy2(src, dst)
 
 
