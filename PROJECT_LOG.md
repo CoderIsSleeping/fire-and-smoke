@@ -630,6 +630,59 @@ first:
    Model 1's speed; if accuracy holds, the speed can come from TensorRT and
    batching rather than a smaller trunk.
 
+## 6f. Backbone comparison at stage 1: DINOv3 vs ResNet-18 vs MobileNetV3
+
+Question: does DINOv3 earn its place, or would an ordinary ImageNet CNN do as
+well? The same detector was trained on two CNN backbones (branches
+`backbone-resnet18` and `backbone-mobilenetv3`; details in section 6f on those
+branches). Only the backbone changes: Faster R-CNN head, scene head, glow
+prior, augmentation, optimizer and the 40-epoch frozen-backbone schedule are
+identical. Compared at stage 1 (backbone frozen), which tests the pretrained
+features directly.
+
+Validation split, best epoch of each run:
+
+| Backbone | Best epoch | mAP@0.5 | Smoke AP | Fire AP | Recall at <=1% FPR | Params | Laptop CPU / frame |
+|---|---|---|---|---|---|---|---|
+| **DINOv3 ViT-S/16** (Model 1 stage 1) | 38 | **0.7312** | **0.8212** | **0.6412** | 0.869 @ 0.37% FPR | 39.3M | 894-912 ms |
+| MobileNetV3-Large | 39 | 0.7056 | 0.7898 | 0.6213 | 0.869 @ 0.87% FPR | 20.0M | 346-385 ms |
+| ResNet-18 | 39 | 0.6567 | 0.7368 | 0.5766 | 0.679 @ 0.87% FPR | 27.9M | 414 ms |
+| DINOv3 ViT-Ti + FCOS (Model 2) | 44 | 0.6220 | 0.7277 | 0.5163 | 0.742 @ 0.56% FPR | 6.9M | 338-398 ms |
+
+CPU times: batch 1, 640 px, fp32, median of 15 runs, measured on the project
+laptop; two sessions gave slightly different absolute numbers (listed as
+ranges), the ordering was the same in both.
+
+Findings:
+- **DINOv3 wins on accuracy**, both classes, and reaches the same image recall
+  as MobileNetV3 at less than half the false-alarm rate. Frozen DINOv3 features
+  are measurably better for fire and smoke than frozen ImageNet CNN features.
+- **MobileNetV3 is the best light model**: at Model 2's speed it scores +8.4
+  mAP (+10.5 on fire). It replaces Model 2 as the light option.
+- **ResNet-18 is dominated**: slower than MobileNetV3 and 4.9 mAP worse, with
+  much lower image recall at the operating point (0.68 vs 0.87).
+- In MobileNetV3 the Faster R-CNN head is now ~45% of the CPU time (backbone +
+  neck ~190-220 ms of ~350-385 ms), so an FCOS head on MobileNetV3 is the next
+  speed lever.
+- Epoch time on Kaggle was ~630-655 s for all three: training time is dominated
+  by data loading and the detection head, not the backbone.
+
+Test split (4,306 images, 2,005 verified negatives):
+
+| Backbone | mAP@0.5 | Smoke AP | Fire AP | At conf 0.90: FPR | Recall (any) |
+|---|---|---|---|---|---|
+| **DINOv3 ViT-S/16** (stage 1) | **0.7196** | **0.8050** | **0.6342** | 0.70% | 0.848 |
+| MobileNetV3-Large | 0.6968 | 0.7786 | 0.6150 | 0.60% | 0.834 |
+| DINOv3 ViT-Ti + FCOS (Model 2) | 0.6125 | 0.7158 | 0.5092 | - | 0.763 @ 0.7% (interpolated) |
+| ResNet-18 | pending | | | | |
+
+On test the DINOv3 lead shrinks slightly (2.3 mAP vs 2.6 on val) and the two
+are close at the alarm operating point (1.4 pts recall apart at similar FPR).
+The ResNet-18 test eval stalled on Kaggle and is still to be run; it is the
+least important of the three given its validation result.
+Decision taken: DINOv3 continues to stage 3 (2 vs 4 unfrozen blocks, run in
+parallel from the stage-2 best weights).
+
 ---
 
 ## 7. Change log
