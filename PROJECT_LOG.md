@@ -732,6 +732,38 @@ more robust on unfamiliar industrial scenes, which the D-Fire test cannot
 measure; the next check is a stage 2 vs fine-tune comparison on site and
 industrial video clips.
 
+## 6h. Small, distant fires on industrial video
+
+Test clips: industrial CCTV footage (1920x1080, kept out of the repo) with
+fires edited in. Clip 1 (10 s, one medium fire, 2.0-6.0 s): Model 1 scored
+0.91-0.997 on every sampled frame with fire and <= 0.06 without; MobileNetV3
+also caught it (alarm at 2.13 s) but scored "smoke" at 0.45-0.76 on the empty
+scene throughout; Model 2 peaked at ~0.56 and never confirmed.
+
+Clip 2 (101 s, fires of several sizes and positions) exposed the weak point.
+Big and medium fires (~120 px) confirmed at 0.98+. Three small ones (35-43 px)
+were **seen but never confirmed**: median scores 0.63-0.86, rarely >= 0.90.
+The tracker was ruled out (consecutive-frame IoU 0.79-0.84, never < 0.2).
+Cause: letterboxing 1920 -> 640 shrinks a 40 px flame to ~13 px, and the 0.90
+threshold from the D-Fire photo split is too strict for that.
+
+| Setting | Distant 43 px | Train 35 px | Bottom-left 42 px |
+|---|---|---|---|
+| 640, conf 0.90 (old) | no | no | no |
+| 640, conf 0.80 | no | 94.5 s | 95.2 s |
+| 960, conf 0.80 | 77.2 s | 94.3 s | no (score falls to ~0.5) |
+| **640+960 merged, conf 0.80** | **77.2 s** | **94.0 s** | **95.2 s** |
+
+Fires appeared at 76.5 s, 93.2 s and 93.3 s. No other detection >= 0.75
+anywhere in the clip at either size. Added `--scales` to
+`predict_video_dinov3.py` and `compare_models.py` (NMS merge across sizes).
+Cost: ~3.2 s/frame on the laptop CPU vs ~0.9 s for 640 only.
+
+Not solved: a ~20 px flame (1% of frame width) was never detected at either
+size -> tiling is the next step. Before adopting 640+960 / 0.80 for
+deployment, the false-alarm check on the 54.5 min site footage must be re-run
+with these settings (it was 0 false alarms at 640 / >= 0.75).
+
 ---
 
 ## 7. Change log
