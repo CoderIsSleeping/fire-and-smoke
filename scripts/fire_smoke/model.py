@@ -1,4 +1,7 @@
-"""The fire / smoke model: DINOv3 pyramid + Faster R-CNN head + scene head.
+"""The fire / smoke model: backbone pyramid + Faster R-CNN head + scene head.
+
+The backbone is DINOv3 (the main model) or a CNN baseline -- ResNet-18 or
+MobileNetV3-Large -- picked by name through `build_backbone`.
 
 Two heads share one frozen trunk pass:
 
@@ -31,8 +34,8 @@ from .backbone import (
     PYRAMID_NAMES,
     PYRAMID_STRIDES,
     SIZE_DIVISIBLE,
-    DinoPyramidBackbone,
     SceneHead,
+    build_backbone,
 )
 from .glow import GLOW_FEATURE_DIM
 
@@ -65,8 +68,8 @@ class FireSmokeDetector(nn.Module):
         if head not in ("frcnn", "fcos"):
             raise ValueError(f"head must be 'frcnn' or 'fcos', got {head!r}")
         self.head_type = head
-        trunk = DinoPyramidBackbone(
-            model_name=backbone_name,
+        trunk = build_backbone(
+            backbone_name,
             pretrained=pretrained_backbone,
             out_channels=fpn_channels,
             unfreeze_last_n=unfreeze_last_n,
@@ -231,7 +234,7 @@ class FireSmokeDetector(nn.Module):
         return self.detector.postprocess_detections(split, split_anchors, image_sizes)
 
     @property
-    def backbone(self) -> DinoPyramidBackbone:
+    def backbone(self) -> nn.Module:
         # Exposed through the detector so the trunk is stored once in state_dict.
         return self.detector.backbone
 

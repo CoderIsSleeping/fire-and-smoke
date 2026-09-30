@@ -80,11 +80,17 @@ def check_backbone(name: str) -> dict:
     known = name in timm.list_pretrained(f"*{name.split('.')[0]}*")
     info = {"model": name, "known_to_timm": known}
     try:
-        model = timm.create_model(name, pretrained=True, num_classes=0)
+        from fire_smoke.backbone import is_cnn_backbone
+
+        if is_cnn_backbone(name):
+            model = timm.create_model(name, pretrained=True, features_only=True)
+            info["feature_channels"] = model.feature_info.channels()
+        else:
+            model = timm.create_model(name, pretrained=True, num_classes=0)
+            info["embed_dim"] = model.embed_dim
+            info["depth"] = len(model.blocks)
         info["ok"] = True
         info["params_m"] = round(sum(p.numel() for p in model.parameters()) / 1e6, 1)
-        info["embed_dim"] = model.embed_dim
-        info["depth"] = len(model.blocks)
     except Exception as exc:  # noqa: BLE001 - we want the message, whatever it is
         info["ok"] = False
         info["error"] = f"{type(exc).__name__}: {exc}"
