@@ -680,8 +680,57 @@ On test the DINOv3 lead shrinks slightly (2.3 mAP vs 2.6 on val) and the two
 are close at the alarm operating point (1.4 pts recall apart at similar FPR).
 ResNet-18 confirms its validation result on test: 4.9 mAP behind MobileNetV3
 and 10.5 pts lower recall at the 0.90 threshold, while also slower on CPU.
-Decision taken: DINOv3 continues to stage 3 (2 vs 4 unfrozen blocks, run in
-parallel from the stage-2 best weights).
+Plan change: the 4-block run was dropped for the deadline; stage 3 kept 2
+unfrozen blocks and added external fire data instead (section 6g).
+
+## 6g. More fire data: DFS + FASDD merged into training
+
+Motivation: fire images were half as common as smoke images in training (3,819
+vs 6,778) and fire AP (0.64) held the average down.
+
+**Data.** `scripts/merge_extra_datasets.py` added two public datasets to the
+training split only (val/test untouched):
+- DFS (Roboflow mirror, Public Domain): 6,792 fire images + 1,008 hard
+  negatives from its `other` class (lamps, sunsets, fire-coloured objects).
+- FASDD_CV (Kaggle COCO mirror, CC BY 4.0): 8,000 fire images (capped) +
+  1,500 negatives.
+- Near-duplicate check (dHash candidates confirmed on 64x64 thumbnails) removed
+  **1,931 copies of base images, including 375 test images** -- FASDD is partly
+  built from D-Fire, so without the check the test score would have been
+  inflated. Training set: 13,776 -> 31,076 images; fire images ~3,800 -> ~18,600.
+
+**Runs** (DINOv3 ViT-S, last 2 blocks unfrozen, lr 5e-5):
+1. Merged: from stage-2 best, 12 epochs on the merged set (~26 min/epoch).
+   Val mAP dipped to 0.6939 at epoch 1 and recovered to 0.7177 by epoch 12.
+2. D-Fire fine-tune: from run 1's best, 4 epochs on D-Fire only, lr 2e-5.
+   Val best 0.7276 (epoch 1); epoch 4 had the best alarm recall on val
+   (90.8% at 0.62% FPR vs stage 2's 88.9%).
+
+**Test split:**
+
+| Model | Smoke AP | Fire AP | mAP@0.5 | @0.90: FP images (FPR) | Recall any |
+|---|---|---|---|---|---|
+| **Stage 2 (Model 1)** | **0.8146** | **0.6377** | **0.7261** | 14 (0.70%) | **0.8748** |
+| D-Fire fine-tune, epoch 4 (`last.pt`) | 0.8082 | 0.6362 | 0.7222 | 14 (0.70%) | 0.8679 |
+| D-Fire fine-tune, epoch 1 (`best.pt`) | 0.8058 | 0.6197 | 0.7128 | 15 (0.75%) | 0.8661 |
+
+**Result: 4x more fire data did not improve the D-Fire test score.** The best
+fine-tuned checkpoint ties stage 2 (-0.4 mAP, -0.7 pts recall at an identical
+false-alarm count); fire recall at 0.90 is marginally higher (0.788 vs 0.780),
+smoke marginally lower. The +2 pt alarm-recall gain seen on val did not
+reproduce on test -- within split-to-split variation.
+
+Interpretation: the D-Fire benchmark rewards D-Fire's own box conventions, and
+the external datasets label fire/smoke differently (smoke AP dropped most
+during the merged run, fire AP the least). Together with the label noise found
+inside D-Fire itself (adjacent frames 10 s apart labelled smoke in one and fire
+in the other), the evidence points to label consistency, not data quantity, as
+the ceiling on box mAP here.
+
+Decision: **stage 2 remains Model 1.** The merged/fine-tuned model may still be
+more robust on unfamiliar industrial scenes, which the D-Fire test cannot
+measure; the next check is a stage 2 vs fine-tune comparison on site and
+industrial video clips.
 
 ---
 
