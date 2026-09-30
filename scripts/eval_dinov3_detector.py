@@ -36,8 +36,10 @@ from fire_smoke.metrics import (
     detection_metrics,
     format_alarm_table,
     format_detection_table,
+    format_size_table,
     pick_operating_threshold,
     scene_sweep,
+    size_breakdown,
 )
 from fire_smoke.model import load_detector
 
@@ -157,11 +159,14 @@ def main() -> None:
     preds, gts, scene_probs, scene_targets = run_inference(model, loader, device, args.amp)
 
     det = detection_metrics(preds, gts)
+    sizes = size_breakdown(preds, gts, image_size)
     sweep = alarm_sweep(preds, gts)
     operating = pick_operating_threshold(sweep, args.target_fpr)
     scene = scene_sweep(scene_probs, scene_targets)
 
     print("\n" + format_detection_table(det))
+    print("\nby object size (sqrt of box area, in pixels of a 640 px input)")
+    print(format_size_table(sizes))
     print("\nimage-level alarm sweep (FPR is over verified-negative images)")
     print(format_alarm_table(sweep))
     print(
@@ -197,6 +202,7 @@ def main() -> None:
         "image_size": image_size,
         "num_images": len(dataset),
         "detection": det,
+        "by_size": sizes,
         "alarm_sweep": sweep,
         "operating_point": operating,
         "target_fpr": args.target_fpr,
@@ -219,6 +225,15 @@ def main() -> None:
                 "",
                 "```",
                 format_detection_table(det),
+                "```",
+                "",
+                "## By object size",
+                "",
+                "Size = sqrt(box area) in pixels of a 640 px input. rec@c = share of those objects found "
+                "(IoU >= 0.5) with confidence >= c; med conf = median confidence when found.",
+                "",
+                "```",
+                format_size_table(sizes),
                 "```",
                 "",
                 "## Alarm sweep",

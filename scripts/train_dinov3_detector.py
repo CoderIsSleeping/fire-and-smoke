@@ -96,6 +96,12 @@ def parse_args() -> argparse.Namespace:
     aug.add_argument("--crop-prob", type=float, default=0.80)
     aug.add_argument("--jitter-prob", type=float, default=0.80)
     aug.add_argument("--blur-prob", type=float, default=0.10)
+    aug.add_argument("--mosaic-prob", type=float, default=0.0,
+                     help="Tile 2x2 / 3x3 images into one frame so objects appear small and distant.")
+    aug.add_argument("--paste-prob", type=float, default=0.0,
+                     help="Blend 1-3 small real flames (8-40 px at the model input) into the image.")
+    aug.add_argument("--paste-min", type=float, default=8.0)
+    aug.add_argument("--paste-max", type=float, default=40.0)
     aug.add_argument("--no-augment", action="store_true", help="Disable all augmentation (ablation baseline).")
 
     run = p.add_argument_group("run")
@@ -140,6 +146,10 @@ def build_augment_config(args: argparse.Namespace) -> AugmentConfig:
         gray=args.gray_prob,
         blur=args.blur_prob,
         occlude_fire=args.occlude_prob,
+        mosaic=args.mosaic_prob,
+        paste_fire=args.paste_prob,
+        paste_min=args.paste_min,
+        paste_max=args.paste_max,
     )
 
 

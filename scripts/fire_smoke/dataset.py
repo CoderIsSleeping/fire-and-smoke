@@ -20,6 +20,14 @@ imagery and the target is a fixed industrial camera running around the clock:
                     surrounding illumination rather than from the flame itself.
   * `crop`/`flip`/`jitter`/`blur` -- ordinary scale, viewpoint and sensor
                     variation.
+  * `mosaic`     -- tiles 2x2 or 3x3 training images into one frame, so every
+                    object appears at 1/2 or 1/3 of its usual size in a busy,
+                    wide scene. `crop` only ever zooms *in*; this zooms out.
+  * `paste_fire` -- cuts real flames out of training fire boxes and blends them
+                    into the image at 8-40 px (in a 640 px input). Distant
+                    flames on a fixed CCTV camera were measured to score 0.6-0.9
+                    at that size; this manufactures thousands of them, in scenes
+                    D-Fire never shows them in, with exact boxes.
 """
 
 from __future__ import annotations
@@ -52,10 +60,18 @@ class AugmentConfig:
     gray: float = 0.10
     blur: float = 0.10
     occlude_fire: float = 0.25
+    # Small / distant fire augmentation. Off by default so earlier runs are
+    # reproduced exactly; switched on with --mosaic-prob / --paste-prob.
+    mosaic: float = 0.0
+    paste_fire: float = 0.0
+    paste_min: float = 8.0   # pasted flame size, sqrt(area) in px of the final model input
+    paste_max: float = 40.0
+    paste_max_count: int = 3
 
     @staticmethod
     def disabled() -> "AugmentConfig":
-        return AugmentConfig(hflip=0, crop=0, jitter=0, night=0, gray=0, blur=0, occlude_fire=0)
+        return AugmentConfig(hflip=0, crop=0, jitter=0, night=0, gray=0, blur=0, occlude_fire=0,
+                             mosaic=0, paste_fire=0)
 
 
 def load_data_config(data_yaml: str | Path) -> tuple[Path, dict]:
@@ -330,8 +346,100 @@ def occlude_fire(image: np.ndarray, boxes: np.ndarray, labels: np.ndarray, rng: 
     return image
 
 
-def augment(image, boxes, labels, cfg: AugmentConfig, rng: random.Random):
-    if cfg.crop and rng.random() < cfg.crop:
+
+def flame_alpha(crop: np.ndarray):
+    """Soft mask of the flame inside a fire-box crop, or None if there is no clean flame.
+
+    Brightness alone is not enough: a fire box against a bright sky would cut
+    out the sky and teach the model that sky is fire. So pixels must be *warm*
+    (red well above blue); the white-hot core, which is not warm, is added
+    back only where it touches warm pixels. Crops with too little or too much
+    flame are rejected, and edges fade with an elliptical window so no
+    rectangular seam is left behind.
+    """
+    x = crop.astype(np.float32) / 255.0
+    value = x.max(axis=2)
+    warm = np.clip(x[..., 0] - x[..., 2], 0, 1)
+    fire = warm * value  # dark but reddish pixels (burnt ground, embers' shadow) count for little
+    if fire.max() < 0.2:
+        return None
+    lo, hi = np.percentile(fire, 40), np.percentile(fire, 95)
+    alpha = np.clip((fire - lo) / max(hi - lo, 1e-3), 0, 1)
+    near_flame = cv2.dilate((alpha > 0.5).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+    alpha = np.maximum(alpha, ((value > 0.85) & near_flame).astype(np.float32))
+    solid = alpha > 0.5
+    coverage = float(solid.mean())
+    if not 0.04 <= coverage <= 0.75 or float(value[solid].mean()) < 0.55:
+        return None
+    h, w = alpha.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    ellipse = ((xx - (w - 1) / 2) / (w / 2)) ** 2 + ((yy - (h - 1) / 2) / (h / 2)) ** 2
+    alpha *= np.clip(1.25 - ellipse, 0, 1)
+    return cv2.GaussianBlur(alpha, (0, 0), max(0.6, min(h, w) / 30))
+
+
+def paste_small_fires(image, boxes, labels, sample_flame, rng: random.Random, cfg: AugmentConfig, image_size: int):
+    """Blend 1..paste_max_count small real flames into the image, with labels."""
+    h, w = image.shape[:2]
+    ratio = image_size / max(h, w)  # letterbox scale applied later
+    image = image.copy()
+    new_boxes, new_labels = [boxes.reshape(-1, 4)], [labels.reshape(-1)]
+    for _ in range(rng.randint(1, cfg.paste_max_count)):
+        flame = sample_flame(rng)
+        if flame is None:
+            continue
+        crop, alpha = flame
+        target = rng.uniform(cfg.paste_min, cfg.paste_max) / ratio  # sqrt-area in this image's pixels
+        scale = target / np.sqrt(crop.shape[0] * crop.shape[1])
+        fw, fh = max(3, int(round(crop.shape[1] * scale))), max(3, int(round(crop.shape[0] * scale)))
+        if fw >= w // 2 or fh >= h // 2:
+            continue
+        interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+        crop_r = cv2.resize(crop, (fw, fh), interpolation=interp).astype(np.float32)
+        alpha_r = cv2.resize(alpha, (fw, fh), interpolation=cv2.INTER_LINEAR)[..., None]
+        existing = np.concatenate(new_boxes)
+        placed = False
+        for _attempt in range(10):
+            x0, y0 = rng.randint(0, w - fw), rng.randint(0, h - fh)
+            overlap = (
+                (np.minimum(x0 + fw, existing[:, 2]) > np.maximum(x0, existing[:, 0]))
+                & (np.minimum(y0 + fh, existing[:, 3]) > np.maximum(y0, existing[:, 1]))
+            )
+            if not overlap.any():
+                placed = True
+                break
+        if not placed:
+            continue
+        ys, xs = np.where(alpha_r[..., 0] > 0.35)
+        if len(xs) < 4:
+            continue
+        region = image[y0:y0 + fh, x0:x0 + fw].astype(np.float32)
+        image[y0:y0 + fh, x0:x0 + fw] = np.clip(alpha_r * crop_r + (1 - alpha_r) * region, 0, 255).astype(np.uint8)
+        new_boxes.append(np.array([[x0 + xs.min(), y0 + ys.min(), x0 + xs.max() + 1, y0 + ys.max() + 1]], np.float32))
+        new_labels.append(np.array([1], np.int64))
+    return image, np.concatenate(new_boxes).astype(np.float32), np.concatenate(new_labels).astype(np.int64)
+
+
+def cover_resize(image, boxes, labels, size: int, rng: random.Random):
+    """Resize to fill a size x size cell (random crop of the overflow), boxes adjusted."""
+    h, w = image.shape[:2]
+    scale = size / min(h, w)
+    nw, nh = max(size, int(round(w * scale))), max(size, int(round(h * scale)))
+    image = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    x0, y0 = rng.randint(0, nw - size), rng.randint(0, nh - size)
+    image = image[y0:y0 + size, x0:x0 + size]
+    if len(boxes) == 0:
+        return image, boxes, labels
+    b = boxes * scale
+    area = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+    b[:, [0, 2]] = (b[:, [0, 2]] - x0).clip(0, size)
+    b[:, [1, 3]] = (b[:, [1, 3]] - y0).clip(0, size)
+    kept = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1]) > 0.4 * np.maximum(area, 1e-6)
+    return image, b[kept], labels[kept]
+
+
+def augment(image, boxes, labels, cfg: AugmentConfig, rng: random.Random, paste=None, crop: bool = True):
+    if crop and cfg.crop and rng.random() < cfg.crop:
         image, boxes, labels = random_crop(image, boxes, labels, rng, cfg.crop_min_scale)
 
     if cfg.hflip and rng.random() < cfg.hflip:
@@ -343,6 +451,11 @@ def augment(image, boxes, labels, cfg: AugmentConfig, rng: random.Random):
 
     if cfg.occlude_fire and rng.random() < cfg.occlude_fire:
         image = occlude_fire(image, boxes, labels, rng)
+
+    # After geometry, before photometry: pasted flames then get the same
+    # night / IR / blur treatment as the rest of the frame.
+    if paste is not None and cfg.paste_fire and rng.random() < cfg.paste_fire:
+        image, boxes, labels = paste(image, boxes, labels, rng)
 
     if cfg.jitter and rng.random() < cfg.jitter:
         image = color_jitter(image, rng)
@@ -391,6 +504,81 @@ class FireSmokeDataset(Dataset):
         self.cfg = augment_cfg or AugmentConfig.disabled()
         self.seed = seed
         self.split = split
+        self.flame_bank = self._build_flame_bank() if self.cfg.paste_fire > 0 else []
+
+    def _build_flame_bank(self) -> list[tuple[Path, float, float, float, float]]:
+        """Fire boxes big enough to cut a clean flame from (normalised cx, cy, w, h)."""
+        bank = []
+        for image_path in self.images:
+            label = self.label_path(image_path)
+            if not label.exists():
+                continue
+            for line in label.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = line.split()
+                if len(parts) == 5 and parts[0] in ("1", "1.0"):
+                    cx, cy, bw, bh = (float(v) for v in parts[1:])
+                    if 0.05 <= bw <= 0.6 and 0.05 <= bh <= 0.6:
+                        bank.append((image_path, cx, cy, bw, bh))
+        return bank
+
+    def sample_flame(self, rng: random.Random):
+        for _ in range(12):
+            image_path, cx, cy, bw, bh = self.flame_bank[rng.randrange(len(self.flame_bank))]
+            bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+            h, w = bgr.shape[:2]
+            x1, x2 = max(0, int((cx - bw / 2) * w)), min(w, int((cx + bw / 2) * w))
+            y1, y2 = max(0, int((cy - bh / 2) * h)), min(h, int((cy + bh / 2) * h))
+            if x2 - x1 < 16 or y2 - y1 < 16:
+                continue
+            crop = cv2.cvtColor(bgr[y1:y2, x1:x2], cv2.COLOR_BGR2RGB)
+            if rng.random() < 0.5:
+                crop = np.ascontiguousarray(crop[:, ::-1])
+            alpha = flame_alpha(crop)
+            if alpha is None:
+                continue
+            return crop, alpha
+        return None
+
+    def _load(self, index: int):
+        image_path = self.images[index]
+        bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(f"Could not read image: {image_path}")
+        image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        height, width = image.shape[:2]
+        boxes, labels = read_yolo_label(self.label_path(image_path), width, height)
+        boxes, labels = clip_and_filter(boxes, labels, width, height)
+        return image, boxes, labels
+
+    def _mosaic(self, index: int, rng: random.Random):
+        """2x2 (70%) or 3x3 (30%) grid of training images, this one included."""
+        grid = 2 if rng.random() < 0.7 else 3
+        cell = self.image_size
+        indices = [index] + [rng.randrange(len(self.images)) for _ in range(grid * grid - 1)]
+        rng.shuffle(indices)
+        canvas = np.zeros((grid * cell, grid * cell, 3), np.uint8)
+        all_boxes, all_labels = [], []
+        for k, idx in enumerate(indices):
+            image, boxes, labels = self._load(idx)
+            if rng.random() < 0.5:
+                image = np.ascontiguousarray(image[:, ::-1])
+                if len(boxes):
+                    boxes = boxes.copy()
+                    boxes[:, [0, 2]] = image.shape[1] - boxes[:, [2, 0]]
+            tile, boxes, labels = cover_resize(image, boxes, labels, cell, rng)
+            r, c = divmod(k, grid)
+            canvas[r * cell:(r + 1) * cell, c * cell:(c + 1) * cell] = tile
+            if len(boxes):
+                boxes = boxes.copy()
+                boxes[:, [0, 2]] += c * cell
+                boxes[:, [1, 3]] += r * cell
+                all_boxes.append(boxes)
+                all_labels.append(labels)
+        if all_boxes:
+            return canvas, np.concatenate(all_boxes).astype(np.float32), np.concatenate(all_labels).astype(np.int64)
+        return canvas, np.zeros((0, 4), np.float32), np.zeros((0,), np.int64)
 
     def __len__(self) -> int:
         return len(self.images)
@@ -399,20 +587,21 @@ class FireSmokeDataset(Dataset):
         return self.label_dir / f"{image_path.stem}.txt"
 
     def __getitem__(self, index: int):
-        image_path = self.images[index]
-        bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise RuntimeError(f"Could not read image: {image_path}")
-        image = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        height, width = image.shape[:2]
-
-        boxes, labels = read_yolo_label(self.label_path(image_path), width, height)
-        boxes, labels = clip_and_filter(boxes, labels, width, height)
-
         # Per-sample RNG keyed on epoch-independent index + worker entropy so
         # DataLoader workers do not all draw the same augmentations.
         rng = random.Random((self.seed * 1_000_003 + index * 7919 + random.randrange(1 << 30)) & 0xFFFFFFFF)
-        image, boxes, labels = augment(image, boxes, labels, self.cfg, rng)
+
+        paste = None
+        if self.flame_bank:
+            def paste(img, bxs, lbls, r):
+                return paste_small_fires(img, bxs, lbls, self.sample_flame, r, self.cfg, self.image_size)
+
+        if self.cfg.mosaic and rng.random() < self.cfg.mosaic:
+            image, boxes, labels = self._mosaic(index, rng)
+            image, boxes, labels = augment(image, boxes, labels, self.cfg, rng, paste=paste, crop=False)
+        else:
+            image, boxes, labels = self._load(index)
+            image, boxes, labels = augment(image, boxes, labels, self.cfg, rng, paste=paste)
 
         canvas, (ratio, pad_left, pad_top) = letterbox(image, self.image_size)
         boxes = apply_letterbox_to_boxes(boxes, ratio, pad_left, pad_top)

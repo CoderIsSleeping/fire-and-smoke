@@ -126,6 +126,133 @@ def detection_metrics(preds: list[dict], gts: list[dict], class_ids=(1, 2), clas
     return result
 
 
+# Box size = sqrt(area) in pixels of a 640 px model input. The bands follow the
+# project's own problem, not COCO's: an edited-in flame 35-45 px wide in a
+# 1920 px CCTV frame lands at ~11-15 px here, which is where the detector's
+# confidence was measured to drop below the alarm threshold.
+SIZE_BANDS = (("tiny", 0, 16), ("small", 16, 32), ("medium", 32, 96), ("large", 96, float("inf")))
+
+
+def box_side(boxes: np.ndarray, image_size: int = 640) -> np.ndarray:
+    """sqrt(area), rescaled to a 640 px input so bands mean the same at any imgsz."""
+    if len(boxes) == 0:
+        return np.zeros(0, np.float32)
+    area = (boxes[:, 2] - boxes[:, 0]).clip(0) * (boxes[:, 3] - boxes[:, 1]).clip(0)
+    return np.sqrt(area) * (640.0 / image_size)
+
+
+def average_precision_in_band(preds, gts, class_id: int, iou_threshold: float, lo: float, hi: float,
+                              image_size: int = 640) -> tuple[float, int]:
+    """AP restricted to ground truth whose size falls in [lo, hi), COCO-style.
+
+    Ground truth outside the band is not deleted but *ignored*: a detection
+    that matches it counts as neither a hit nor a false positive, and an
+    unmatched detection whose own size is outside the band is ignored too.
+    Deleting it instead would turn every correct large-fire box into a false
+    positive when scoring the small band.
+    """
+    gt_boxes, gt_ignore, gt_used, total = [], [], [], 0
+    for gt in gts:
+        boxes = gt["boxes"][gt["labels"] == class_id]
+        side = box_side(boxes, image_size)
+        ignore = (side < lo) | (side >= hi)
+        order = np.argsort(ignore, kind="stable")  # in-band first, so they are matched first
+        gt_boxes.append(boxes[order])
+        gt_ignore.append(ignore[order])
+        gt_used.append(np.zeros(len(boxes), bool))
+        total += int((~ignore).sum())
+    if total == 0:
+        return float("nan"), 0
+
+    rows = []
+    for image_index, pred in enumerate(preds):
+        mask = pred["labels"] == class_id
+        for box, score in zip(pred["boxes"][mask], pred["scores"][mask]):
+            rows.append((float(score), image_index, box))
+    if not rows:
+        return 0.0, total
+    rows.sort(key=lambda r: -r[0])
+
+    tp, fp = [], []
+    for _, image_index, box in rows:
+        candidates = gt_boxes[image_index]
+        matched_ignored, hit = False, False
+        if len(candidates):
+            ious = box_iou(box[None, :], candidates)[0]
+            ious[gt_used[image_index]] = -1.0
+            valid = ious >= iou_threshold
+            in_band = valid & ~gt_ignore[image_index]
+            if in_band.any():
+                best = int(np.argmax(np.where(in_band, ious, -1.0)))
+                gt_used[image_index][best] = True
+                hit = True
+            elif valid.any():
+                best = int(np.argmax(np.where(valid, ious, -1.0)))
+                gt_used[image_index][best] = True
+                matched_ignored = True
+        if hit:
+            tp.append(1.0); fp.append(0.0)
+        elif matched_ignored:
+            continue
+        else:
+            side = box_side(box[None, :], image_size)[0]
+            if lo <= side < hi:
+                tp.append(0.0); fp.append(1.0)
+    if not tp:
+        return 0.0, total
+    # float32, as in average_precision: with the full size range this then
+    # reproduces the standard AP exactly.
+    tp_cum, fp_cum = np.cumsum(np.array(tp, np.float32)), np.cumsum(np.array(fp, np.float32))
+    return _ap_from_pr(tp_cum / total, tp_cum / np.maximum(tp_cum + fp_cum, 1e-9)), total
+
+
+def size_breakdown(preds, gts, image_size: int = 640, class_ids=(1, 2), class_names=("smoke", "fire"),
+                   conf_levels=(0.5, 0.8, 0.9)) -> dict:
+    """Per class and size band: AP@0.5, recall at fixed confidences, and the
+    median confidence the model gives those objects when it finds them."""
+    out = {}
+    for class_id, name in zip(class_ids, class_names):
+        out[name] = {}
+        for band, lo, hi in SIZE_BANDS:
+            ap, n = average_precision_in_band(preds, gts, class_id, 0.5, lo, hi, image_size)
+            best_scores = []
+            for pred, gt in zip(preds, gts):
+                boxes = gt["boxes"][gt["labels"] == class_id]
+                side = box_side(boxes, image_size)
+                boxes = boxes[(side >= lo) & (side < hi)]
+                if len(boxes) == 0:
+                    continue
+                mask = pred["labels"] == class_id
+                pboxes, pscores = pred["boxes"][mask], pred["scores"][mask]
+                ious = box_iou(boxes, pboxes) if len(pboxes) else np.zeros((len(boxes), 0))
+                for row in ious:
+                    hits = pscores[row >= 0.5]
+                    best_scores.append(float(hits.max()) if len(hits) else 0.0)
+            scores = np.array(best_scores)
+            entry = {"num_gt": n, "AP50": ap}
+            for c in conf_levels:
+                entry[f"recall@{c}"] = float((scores >= c).mean()) if len(scores) else float("nan")
+            found = scores[scores > 0]
+            entry["median_conf_when_found"] = float(np.median(found)) if len(found) else float("nan")
+            out[name][band] = entry
+    return out
+
+
+def format_size_table(breakdown: dict, conf_levels=(0.5, 0.8, 0.9)) -> str:
+    rec_cols = "".join(f" {'rec@' + str(c):>8}" for c in conf_levels)
+    header = f"{'class':>6} {'size (px@640)':>14} {'#GT':>6} {'AP50':>7}{rec_cols} {'med conf':>9}"
+    lines = [header, "-" * len(header)]
+    bands = {b: (lo, hi) for b, lo, hi in SIZE_BANDS}
+    for name, per_band in breakdown.items():
+        for band, e in per_band.items():
+            lo, hi = bands[band]
+            label = f"{band} {int(lo)}-{int(hi)}" if hi != float("inf") else f"{band} >{int(lo)}"
+            recs = "".join(f" {e[f'recall@{c}']:>8.3f}" for c in conf_levels)
+            lines.append(f"{name:>6} {label:>14} {e['num_gt']:>6d} {e['AP50']:>7.4f}{recs} "
+                         f"{e['median_conf_when_found']:>9.3f}")
+    return "\n".join(lines)
+
+
 def alarm_sweep(preds: list[dict], gts: list[dict], thresholds=DEFAULT_THRESHOLDS) -> list[dict]:
     """Image-level alarm behaviour as a function of the confidence threshold.
 
