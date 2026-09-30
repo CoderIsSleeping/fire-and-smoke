@@ -51,6 +51,46 @@ ALARM_COLOR = (0, 0, 235)
 
 
 
+
+def detect_multiscale(model, rgb, scales, device, use_amp=False):
+    """Run the detector at one or more input sizes and merge the boxes.
+
+    Small, distant fires shrink below what the model can see when a 1920 px
+    frame is letterboxed to 640 (a 40 px flame becomes ~13 px). Measured on an
+    industrial test clip: at 640 only, three small fires (35-43 px) scored
+    0.63-0.86 and never confirmed; at 960 the distant one rose to 0.94 but a
+    mid-size one fell to ~0.5 (the model was trained at 640). Merging both
+    sizes caught all three with no extra detections anywhere else. The first
+    size is the base: its scene-head output is the one reported.
+
+    Returns boxes in original-frame pixels (before clean_boxes), scores,
+    labels and the base scale's scene probabilities.
+    """
+    transform = model.detector.transform
+    all_boxes, all_scores, all_labels, scene = [], [], [], None
+    for size in scales:
+        transform.min_size, transform.max_size = (size,), size
+        canvas, (ratio, pad_left, pad_top) = letterbox(rgb, size)
+        tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy()).float().div_(255.0).to(device)
+        glow_vector = torch.from_numpy(glow_features(canvas)[None, :]).to(device)
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            detections, scene_probs = model([tensor], glow=glow_vector)
+        det = detections[0]
+        all_boxes.append(undo_letterbox(det["boxes"].float().cpu().numpy(), ratio, pad_left, pad_top))
+        all_scores.append(det["scores"].float().cpu().numpy())
+        all_labels.append(det["labels"].cpu().numpy())
+        if scene is None:
+            scene = scene_probs[0].float().cpu().numpy()
+    boxes = np.concatenate(all_boxes).astype(np.float32)
+    scores = np.concatenate(all_scores).astype(np.float32)
+    labels = np.concatenate(all_labels)
+    if len(scales) > 1 and len(scores):
+        from torchvision.ops import batched_nms
+
+        keep = batched_nms(torch.from_numpy(boxes), torch.from_numpy(scores), torch.from_numpy(labels), 0.5).numpy()
+        boxes, scores, labels = boxes[keep], scores[keep], labels[keep]
+    return boxes, scores, labels, scene
+
 def fit_for_display(frame, max_w: int = 1280, max_h: int = 720):
     """Shrink a frame to fit on a laptop screen. Only the live window uses this;
     the saved video keeps full resolution."""
@@ -67,6 +107,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", default="video_annotated.mp4")
     p.add_argument("--events", default=None, help="CSV event log (defaults next to --output).")
     p.add_argument("--imgsz", type=int, default=0, help="Override the checkpoint image size.")
+    p.add_argument("--scales", default=None,
+                   help="Comma-separated input sizes to run and merge, e.g. 640,960. Helps small, "
+                        "distant fires; costs one extra pass per size.")
     p.add_argument("--device", default="auto")
     p.add_argument("--stride", type=int, default=1, help="Run the model every Nth frame; others reuse the last result.")
     p.add_argument("--max-frames", type=int, default=0)
@@ -285,13 +328,20 @@ def main() -> None:
     overrides = {"image_size": args.imgsz} if args.imgsz else {}
     model, _ = load_detector(args.weights, device, **overrides)
     image_size = model.config["image_size"]
+    scales = [int(v) for v in args.scales.split(",")] if args.scales else [image_size]
+    if any(v % 64 for v in scales):
+        raise SystemExit(f"--scales must be multiples of 64, got {scales}")
 
     # On-screen identity, read from the checkpoint so it cannot be mislabelled.
     trunk_name = model.config.get("backbone_name", "")
-    trunk = "ViT-Ti" if "tiny" in trunk_name else "ViT-S" if "small" in trunk_name else trunk_name.split(".")[0]
+    trunk = ("DINOv3 ViT-Ti" if "tiny" in trunk_name else "DINOv3 ViT-S" if "small" in trunk_name
+             else "MobileNetV3-L" if "mobilenetv3" in trunk_name else "ResNet-18" if "resnet18" in trunk_name
+             else trunk_name.split(".")[0])
     head = "FCOS" if model.config.get("head") == "fcos" else "Faster R-CNN"
     params = sum(p.numel() for p in model.parameters()) / 1e6
-    title = f"{args.label + ':  ' if args.label else ''}DINOv3 {trunk} + {head}  ({params:.1f}M)"
+    title = f"{args.label + ':  ' if args.label else ''}{trunk} + {head}  ({params:.1f}M)"
+    if len(scales) > 1:
+        title += f"  @{'+'.join(map(str, scales))}px"
     latencies: list[float] = []
     use_amp = args.amp and device.type == "cuda"
 
@@ -378,28 +428,16 @@ def main() -> None:
 
         if frame_index % args.stride == 0:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            canvas, (ratio, pad_left, pad_top) = letterbox(rgb, image_size)
-            tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy()).float().div_(255.0).to(device)
-
-            glow_vector = torch.from_numpy(glow_features(canvas)[None, :]).to(device)
-
             infer_started = time.perf_counter()
-            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-                detections, scene_probs = model([tensor], glow=glow_vector)
+            boxes, scores, labels, scene_vector = detect_multiscale(model, rgb, scales, device, use_amp)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             latencies.append(time.perf_counter() - infer_started)
-
-            detection = detections[0]
-            boxes = detection["boxes"].float().cpu().numpy()
-            scores = detection["scores"].float().cpu().numpy()
-            labels = detection["labels"].cpu().numpy()
-            boxes = undo_letterbox(boxes, ratio, pad_left, pad_top)
             boxes, scores, labels = clean_boxes(boxes, scores, labels, width, height, args.min_box_size)
             boxes, scores, labels = filter_by_mask(boxes, scores, labels, ignore_mask)
 
             last_boxes, last_scores, last_labels = boxes, scores, labels
-            last_scene = scene_probs[0].float().cpu().numpy()
+            last_scene = scene_vector
             last_alarms = confirmer.update(boxes, scores, labels)
 
             scene_state = {

@@ -40,11 +40,11 @@ import torch
 from tqdm import tqdm
 
 from fire_smoke import CLASS_NAMES
-from fire_smoke.dataset import letterbox, undo_letterbox
-from fire_smoke.glow import glow_features
 from fire_smoke.model import load_detector
 from fire_smoke.temporal import TemporalConfirmer
-from predict_video_dinov3 import LatestFrameReader, clean_boxes, draw_label, open_source, resolve_fps
+from predict_video_dinov3 import (
+    LatestFrameReader, clean_boxes, detect_multiscale, draw_label, open_source, resolve_fps,
+)
 
 BOX_COLOURS = {1: (200, 200, 200), 2: (0, 140, 255)}
 ALARM_COLOUR = (0, 0, 235)
@@ -73,6 +73,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-save", action="store_true", help="Do not write an output video.")
     p.add_argument("--output", default="model_comparison.mp4")
     p.add_argument("--device", default="auto")
+    p.add_argument("--scales", default=None,
+                   help="Comma-separated input sizes run and merged for every model, e.g. 640,960 "
+                        "(helps small, distant fires).")
     p.add_argument("--stride", type=int, default=5, help="Run the models every Nth frame.")
     p.add_argument("--max-seconds", type=float, default=0, help="Stop after this much video (0 = all).")
     p.add_argument("--start-seconds", type=float, default=0, help="Skip this much video first.")
@@ -100,11 +103,13 @@ def describe(model) -> str:
     """One-line architecture summary read from the checkpoint, not typed by hand."""
     cfg = model.config
     name = cfg.get("backbone_name", "")
-    trunk = ("ViT-Ti" if "tiny" in name else "ViT-S+" if "small_plus" in name
-             else "ViT-S" if "small" in name else "ViT-B" if "base" in name else name.split(".")[0])
+    trunk = ("DINOv3 ViT-Ti" if "tiny" in name else "DINOv3 ViT-S+" if "small_plus" in name
+             else "DINOv3 ViT-S" if "small" in name else "DINOv3 ViT-B" if "base" in name
+             else "MobileNetV3-L" if "mobilenetv3" in name else "ResNet-18" if "resnet18" in name
+             else name.split(".")[0])
     head = "FCOS" if cfg.get("head") == "fcos" else "Faster R-CNN"
     params = sum(p.numel() for p in model.parameters()) / 1e6
-    return f"DINOv3 {trunk} + {head}  |  {params:.1f}M params  |  {cfg.get('image_size', '?')}px"
+    return f"{trunk} + {head}  |  {params:.1f}M params  |  {cfg.get('image_size', '?')}px"
 
 
 class Runner:
@@ -117,6 +122,7 @@ class Runner:
         self.model.eval()
         self.device = device
         self.size = self.model.config["image_size"]
+        self.scales = [int(v) for v in args.scales.split(",")] if args.scales else [self.size]
         self.summary = describe(self.model)
         self.confirmer = TemporalConfirmer(
             class_names={1: "smoke", 2: "fire"}, window=args.window, enter_hits=args.enter_hits,
@@ -134,22 +140,14 @@ class Runner:
     def step(self, frame_bgr: np.ndarray) -> None:
         height, width = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        canvas, (ratio, pad_left, pad_top) = letterbox(rgb, self.size)
-        tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy()).float().div_(255.0).to(self.device)
-        glow = torch.from_numpy(glow_features(canvas)[None, :]).to(self.device)
-
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         started = time.perf_counter()
-        detections, _ = self.model([tensor], glow=glow)
+        boxes, scores, labels, _ = detect_multiscale(self.model, rgb, self.scales, self.device)
         if self.device.type == "cuda":
             torch.cuda.synchronize()
         self.latencies.append(time.perf_counter() - started)
 
-        det = detections[0]
-        boxes = undo_letterbox(det["boxes"].float().cpu().numpy(), ratio, pad_left, pad_top)
-        scores = det["scores"].float().cpu().numpy()
-        labels = det["labels"].cpu().numpy()
         boxes, scores, labels = clean_boxes(boxes, scores, labels, width, height, 4.0)
         self.detections = (boxes, scores, labels)
 
