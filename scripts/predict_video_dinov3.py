@@ -50,6 +50,16 @@ GLOW_COLOR = (0, 215, 255)
 ALARM_COLOR = (0, 0, 235)
 
 
+
+def fit_for_display(frame, max_w: int = 1280, max_h: int = 720):
+    """Shrink a frame to fit on a laptop screen. Only the live window uses this;
+    the saved video keeps full resolution."""
+    h, w = frame.shape[:2]
+    scale = min(max_w / w, max_h / h, 1.0)
+    if scale >= 1.0:
+        return frame
+    return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fire/smoke inference on video with temporal confirmation.")
     p.add_argument("--weights", required=True)
@@ -473,7 +483,7 @@ def main() -> None:
         if writer is not None:
             writer.write(frame)
         if args.show:
-            cv2.imshow("fire / smoke  --  press q to stop", frame)
+            cv2.imshow("fire / smoke  --  press q to stop", fit_for_display(frame))
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 print("stopped by user")
                 break

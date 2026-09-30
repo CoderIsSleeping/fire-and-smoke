@@ -51,6 +51,16 @@ ALARM_COLOUR = (0, 0, 235)
 PANEL_TINTS = [(120, 70, 20), (20, 110, 40), (110, 30, 110), (30, 90, 140)]
 
 
+
+def fit_for_display(frame, max_w: int = 1280, max_h: int = 720):
+    """Shrink a frame to fit on a laptop screen. Only the live window uses this;
+    the saved video keeps full resolution."""
+    h, w = frame.shape[:2]
+    scale = min(max_w / w, max_h / h, 1.0)
+    if scale >= 1.0:
+        return frame
+    return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Side-by-side comparison of models on one video.")
     p.add_argument("--model", action="append", required=True, metavar="LABEL=WEIGHTS[@CONF]",
@@ -261,7 +271,7 @@ def main() -> None:
         if writer is not None:
             writer.write(sheet)
         if args.show:
-            cv2.imshow("Model comparison  -  press q to quit", sheet)
+            cv2.imshow("Model comparison  -  press q to quit", fit_for_display(sheet, 1600, 900))
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
         index += 1
