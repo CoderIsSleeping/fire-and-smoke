@@ -329,6 +329,8 @@ def main() -> None:
     print(f"device    : {device} (amp={use_amp})")
     print(f"backbone  : {args.backbone} (unfreeze_last_n={args.unfreeze_last_n})")
     print(f"output    : {out_dir}")
+    print(f"augment   : mosaic={args.mosaic_prob} paste={args.paste_prob} night={args.night_prob} "
+          f"crop={args.crop_prob} occlude={args.occlude_prob}" + ("  (ALL OFF)" if args.no_augment else ""))
 
     augment_cfg = build_augment_config(args)
     train_ds = FireSmokeDataset(data_yaml, "train", args.imgsz, augment_cfg,
