@@ -5,6 +5,8 @@ REM
 REM  Model 1 = DINOv3 ViT-S + Faster R-CNN   (accurate, heavy)
 REM  Model 2 = DINOv3 ViT-Ti + FCOS (light)  (about 2.7x faster, batch-exportable)
 REM  Model 3 = MobileNetV3-L + Faster R-CNN  (about 2.5x faster, close to Model 1)
+REM  Model 6 = Model 1 fine-tuned at 896 px with mosaic (best on small, distant fires;
+REM            about 2.2x slower than Model 1; site false-alarm check still pending)
 REM
 REM  Each model alarms at ITS OWN operating point from the test evaluation:
 REM  the two heads score on different scales, so a shared threshold would be
@@ -26,6 +28,9 @@ set EXIT2=0.40
 set MODEL3=models\model3_mobilenetv3_frcnn_stage1.pt
 set CONF3=0.90
 set EXIT3=0.75
+set MODEL6=models\model6_dinov3_896_mosaic.pt
+set CONF6=0.80
+set EXIT6=0.65
 
 REM Site footage is confidential and git-ignored; use whichever clip is in Industry\video.
 set SITE_VIDEO=
@@ -51,6 +56,8 @@ echo.
 echo   ANY VIDEO FILE (e.g. a fire test clip)
 echo     8  Model 1 alone - saves annotated video + alarm log
 echo     9  Model 1 vs Model 3 (MobileNetV3) side by side
+echo     A  Model 6 alone (small / distant fires) - saves annotated video + alarm log
+echo     B  Model 1 vs Model 6 side by side
 echo.
 echo     0  Exit
 echo.
@@ -66,6 +73,8 @@ if "%CHOICE%"=="6" goto :both_site
 if "%CHOICE%"=="7" goto :both_file
 if "%CHOICE%"=="8" goto :m1_file
 if "%CHOICE%"=="9" goto :m1m3_file
+if /i "%CHOICE%"=="A" goto :m6_file
+if /i "%CHOICE%"=="B" goto :m1m6_file
 if "%CHOICE%"=="0" goto :end
 echo Not a valid choice.
 goto :menu
@@ -148,6 +157,28 @@ if not exist "%VIDEO%" ( echo File not found: %VIDEO% & goto :menu )
     --model "Model 1: DINOv3 ViT-S=%MODEL1%@%CONF1%" ^
     --model "Model 3: MobileNetV3=%MODEL3%@%CONF3%" ^
     --video "%VIDEO%" --stride 2 --show --device cpu --output test_video_compare.mp4
+goto :menu
+
+:m6_file
+if not exist "%MODEL6%" ( echo Missing %MODEL6% & goto :menu )
+set VIDEO=
+set /p VIDEO=Full path to the video file:
+if not exist "%VIDEO%" ( echo File not found: %VIDEO% & goto :menu )
+"%PY%" scripts\predict_video_dinov3.py --weights "%MODEL6%" --label "Model 6" ^
+    --source "%VIDEO%" --show --conf %CONF6% --exit-conf %EXIT6% ^
+    --stride 5 --device cpu --output test_video_model6.mp4 --events test_video_model6_events.csv
+echo Saved test_video_model6.mp4 and test_video_model6_events.csv
+goto :menu
+
+:m1m6_file
+if not exist "%MODEL6%" ( echo Missing %MODEL6% & goto :menu )
+set VIDEO=
+set /p VIDEO=Full path to the video file:
+if not exist "%VIDEO%" ( echo File not found: %VIDEO% & goto :menu )
+"%PY%" scripts\compare_models.py ^
+    --model "Model 1: 640 px=%MODEL1%@%CONF6%" ^
+    --model "Model 6: 896 px + mosaic=%MODEL6%@%CONF6%" ^
+    --video "%VIDEO%" --stride 5 --show --device cpu --output test_video_m1_vs_m6.mp4
 goto :menu
 
 :end

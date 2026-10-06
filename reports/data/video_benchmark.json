@@ -1,0 +1,27 @@
+{
+  "note": "Two industrial CCTV test clips (1920x1080, 9.8 s and 101.1 s) with fires edited in; footage is confidential and kept outside the repository. Alarm = 6 detections in 15 processed frames (every 5th frame) at the stated confidence. Median = median best fire score inside each fire window. Fire windows were derived from stage-2 detections, pending confirmation against the edit timeline.",
+  "fires": [
+    {"id": "Clip 1, medium, centre", "size_px": 147},
+    {"id": "Clip 2, large, centre", "size_px": 140},
+    {"id": "Clip 2, medium, centre", "size_px": 97},
+    {"id": "Clip 2, distant, upper (1st)", "size_px": 43},
+    {"id": "Clip 2, distant, upper (2nd)", "size_px": 44},
+    {"id": "Clip 2, small, right", "size_px": 49},
+    {"id": "Clip 2, small, lower left", "size_px": 53}
+  ],
+  "setups": [
+    {"key": "s2_640", "label": "Stage 2, 640 px", "passes": 1, "cpu_s": 0.9, "conf": 0.80,
+     "median": [0.98, 0.98, 0.97, 0.63, 0.61, 0.86, 0.80], "delay_s": [0.8, 1.0, 0.8, null, null, 1.3, 2.0],
+     "false_alarms": 0},
+    {"key": "s2_640_960", "label": "Stage 2, 640 + 960 px merged", "passes": 2, "cpu_s": 3.2, "conf": 0.80,
+     "median": [null, null, null, null, null, null, null], "delay_s": [0.8, 1.0, 0.8, 0.7, 1.0, 0.8, 2.0],
+     "false_alarms": 0, "caveat": "960 px pass run on the 75-98 s section of clip 2 only"},
+    {"key": "m6_896", "label": "Model 6: 896 px + mosaic", "passes": 1, "cpu_s": 2.0, "conf": 0.80,
+     "median": [0.99, 0.99, 0.92, 0.84, 0.88, 0.91, 0.85], "delay_s": [0.8, 1.0, 0.8, 2.0, 1.0, 1.1, 1.3],
+     "false_alarms": 0, "alarmed_at": {"0.80": 7, "0.90": 6, "0.93": 3}},
+    {"key": "m5_896_paste", "label": "896 px + mosaic + flame paste", "passes": 1, "cpu_s": 2.0, "conf": 0.80,
+     "median": [0.99, 0.99, 0.99, 0.98, 0.99, 0.98, 0.98], "delay_s": [0.7, 0.9, 0.8, 0.7, 0.7, 0.8, 0.8],
+     "false_alarms": 0, "alarmed_at": {"0.80": 7, "0.90": 7, "0.95": 7},
+     "caveat": "trained on pasted flames, and the test fires are pasted flames: biased in its favour"}
+  ]
+}

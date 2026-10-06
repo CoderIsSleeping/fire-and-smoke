@@ -764,6 +764,79 @@ size -> tiling is the next step. Before adopting 640+960 / 0.80 for
 deployment, the false-alarm check on the 54.5 min site footage must be re-run
 with these settings (it was 0 false alarms at 640 / >= 0.75).
 
+## 6i. Small-fire training: 896 px, mosaic, and why flame pasting was dropped
+
+Follow-up to 6h. Goal: make the model itself confident on small, distant fires
+instead of relying on two-size inference.
+
+**Measurement first.** `eval_dinov3_detector.py` now reports accuracy by object
+size (tiny <16, small 16-32, medium 32-96, large >96 px at a 640 input; the
+band AP reproduces the standard AP exactly over the full range).
+`eval_fire_clips.py` scores each fire of the two edited CCTV clips separately:
+median score, time to alarm, false alarms (ground truth kept outside the repo).
+D-Fire is not short of small fires (17% of training fire boxes are <16 px), but
+stage 2 handles them badly: tiny-fire AP 0.251, 9.7% found at conf >= 0.9.
+
+**Three fine-tunes from stage 2**, 6 epochs, lr 3e-5, batch 4 x accum 2, last 2
+blocks unfrozen:
+
+| Test split | Stage 2, 640 px | 896 + mosaic + paste | **896 + mosaic (Model 6)** |
+|---|---|---|---|
+| mAP@0.5 | 0.7207 | 0.7190 | **0.7291** |
+| Fire AP / smoke AP | 0.6278 / **0.8137** | 0.6360 / 0.8021 | **0.6559** / 0.8023 |
+| Tiny fire AP (<16 px) | 0.251 | 0.311 | **0.385** |
+| Small fire AP (16-32 px) | 0.631 | 0.632 | **0.667** |
+| Tiny fires found at conf >= 0.5 | 37% | 53% | 54% |
+| FP images at conf 0.90 (of 2,005) | **14** | 46 | 27 |
+| Recall (any) at <= 1% FPR | **0.901** @0.88 | 0.743 @0.95 | 0.830 @0.93 |
+| Scene head false-fire rate | 1.4% | 6.6% | 1.6% |
+
+- **Mosaic** (`--mosaic-prob`): 2x2 / 3x3 tiling, objects at 1/2-1/3 size.
+- **Flame paste** (`--paste-prob`): real flames cut from training fire boxes
+  with a warm-colour mask and blended in at 8-40 px. **Rejected**: it tripled
+  false alarms and wrecked the scene head -- the model learned "small warm blob
+  = fire". The paste run was (unintentionally) run twice; the repeat gave 0.7166
+  mAP / 44 FP images, so the effect is reproducible, and the paste-off run
+  removed most of it. The code stays in the repo, off by default.
+- **896 px itself** costs something: FP images at 0.90 go from 14 to 27. More
+  small bright objects become visible in normal scenes.
+
+**Video benchmark** (7 fires in two clips, alarm 6-of-15 at conf 0.80):
+
+| Setup | Fires alarmed | Distant fire (43 px) median score | False alarms | CPU s / frame |
+|---|---|---|---|---|
+| Stage 2, 640 px | 5 of 7 | 0.61-0.63 | 0 | 0.9 |
+| Stage 2, 640 + 960 px | 7 of 7 | - | 0 | 3.2 |
+| **Model 6, 896 px** | **7 of 7** | **0.84-0.88** | 0 | 2.0 |
+| Paste model, 896 px | 7 of 7 | 0.98-0.99 | 0 | 2.0 |
+
+Model 6 at 0.90: 6 of 7; at 0.93: 3 of 7. The paste model's 0.98 is partly an
+artefact (trained on pasted flames, tested on pasted flames); Model 6 never saw
+one, so its gain is the honest measure of what resolution does.
+
+**Correction to earlier numbers.** Stage 2 re-evaluated here scored 0.7207, not
+the 0.7261 quoted since section 9. Cause: the test-time change of 2026-09-09
+(300 proposals instead of 1000, 20 boxes per image instead of 50), whose cost
+was measured as 0.001 mAP on a 400-image subset but is ~0.005 on the full test
+split. Stage 1 (0.7196) and stage 2 (0.7261) were evaluated before it,
+everything else after. Consequences: the merged-data fine-tune (0.7222, 6g) is
+marginally ahead of stage 2 on mAP rather than behind, and DINOv3 stage 1's
+lead over MobileNetV3 (6f) is ~0.5 point smaller than tabulated. Stage 1 is to
+be re-evaluated under the current settings. A correction to 6h as well: the
+"~20 px flame never detected" was a misreading of a screenshot taken from the
+zoomed preview window; mapped back to frame coordinates it is the 43 px distant
+fire, which both the two-size setup and Model 6 catch.
+
+**Status.** Model 6 is the candidate main model; Model 1 (stage 2) remains the
+proven one until Model 6 has been run on the 54.5 min site footage.
+
+**Next: hard negatives.** The known false triggers are fire-coloured objects:
+yellow/orange hard hats, hi-vis clothing, bright haze. Plan: add verified
+negatives from (a) public safety-helmet datasets, mapped to `negative` through
+`merge_extra_datasets.py`, (b) the 1,008 DFS `other` images, (c) site frames if
+permitted, then a short fine-tune of Model 6 and the same three checks (size
+table, video benchmark, false alarms).
+
 ---
 
 ## 7. Change log
