@@ -1,0 +1,143 @@
+{
+  "dino": {
+    "backbone": "vit_small_patch16_dinov3.lvd1689m",
+    "head": "frcnn",
+    "total": 39314493,
+    "trunk": 21586944,
+    "neck": 3017984,
+    "det_head": 14508845,
+    "scene": 200720,
+    "trainable_frozen_trunk": 17727549,
+    "trunk_leaf_layers": {
+      "Identity": 76,
+      "Dropout": 50,
+      "Linear": 48,
+      "LayerNorm": 25,
+      "GELU": 12,
+      "Conv2d": 1,
+      "RotaryEmbeddingDinoV3": 1
+    },
+    "epoch": 38,
+    "args": {
+      "epochs": 40,
+      "batch": 8,
+      "lr": 0.0001,
+      "weight_decay": 0.0001,
+      "warmup_iters": 500,
+      "imgsz": 640,
+      "head_convs": null,
+      "fpn_channels": 256,
+      "patience": 8
+    }
+  },
+  "mbv3": {
+    "backbone": "mobilenetv3_large_100.ra_in1k",
+    "head": "frcnn",
+    "total": 20010013,
+    "trunk": 2947552,
+    "neck": 2055680,
+    "det_head": 14508845,
+    "scene": 497936,
+    "trainable_frozen_trunk": 17062461,
+    "trunk_leaf_layers": {
+      "Identity": 99,
+      "Conv2d": 62,
+      "Hardswish": 20,
+      "ReLU": 19,
+      "Hardsigmoid": 8,
+      "FrozenBatchNorm2d": 1
+    },
+    "epoch": 39,
+    "args": {
+      "epochs": 40,
+      "batch": 8,
+      "lr": 0.0001,
+      "weight_decay": 0.0001,
+      "warmup_iters": 500,
+      "imgsz": 640,
+      "head_convs": 4,
+      "fpn_channels": 256,
+      "patience": 8
+    },
+    "feature_channels": [
+      40,
+      112,
+      960
+    ],
+    "feature_strides": [
+      8,
+      16,
+      32
+    ]
+  },
+  "r18": {
+    "backbone": "resnet18.tv_in1k",
+    "head": "frcnn",
+    "total": 27942909,
+    "trunk": 11166912,
+    "neck": 2000384,
+    "det_head": 14508845,
+    "scene": 266768,
+    "trainable_frozen_trunk": 16775997,
+    "trunk_leaf_layers": {
+      "Conv2d": 20,
+      "FrozenBatchNorm2d": 20,
+      "ReLU": 17,
+      "Identity": 16,
+      "MaxPool2d": 1
+    },
+    "epoch": 39,
+    "args": {
+      "epochs": 40,
+      "batch": 8,
+      "lr": 0.0001,
+      "weight_decay": 0.0001,
+      "warmup_iters": 500,
+      "imgsz": 640,
+      "head_convs": 4,
+      "fpn_channels": 256,
+      "patience": 8
+    },
+    "feature_channels": [
+      128,
+      256,
+      512
+    ],
+    "feature_strides": [
+      8,
+      16,
+      32
+    ]
+  },
+  "fcos": {
+    "backbone": "hf_hub:timm/vit_tiny_patch16_dinov3_qkvb.eupe_lvd1689m",
+    "head": "fcos",
+    "total": 6947224,
+    "trunk": 5489664,
+    "neck": 755328,
+    "det_head": 600584,
+    "scene": 101648,
+    "trainable_frozen_trunk": 1457560,
+    "trunk_leaf_layers": {
+      "Identity": 76,
+      "Dropout": 50,
+      "Linear": 48,
+      "LayerNorm": 25,
+      "GELU": 12,
+      "Conv2d": 1,
+      "RotaryEmbeddingDinoV3": 1
+    },
+    "epoch": 44,
+    "args": {
+      "epochs": 45,
+      "batch": 8,
+      "lr": 0.0001,
+      "weight_decay": 0.0001,
+      "warmup_iters": 500,
+      "imgsz": 640,
+      "head_convs": 2,
+      "fpn_channels": 128,
+      "patience": 8
+    }
+  }
+}
