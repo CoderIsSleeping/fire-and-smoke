@@ -157,6 +157,39 @@ s.addNotes("The detector has a backbone that extracts features, a feature pyrami
   + "everything else is identical. The backbone is frozen in stage 1, so we measure how good each backbone's ready-made "
   + "features are.");
 
+// ---------------------------------------------------------------- methodology
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
+s.addText("Methodology: how the models were compared", { placeholder: "title" });
+const steps = [
+  ["Data", ["D-Fire dataset, 21,527 labelled images", "Fixed split: 13,776 train, 3,445 validation, 4,306 test", "45% of images contain no fire or smoke"]],
+  ["Models", ["3 backbones, each with Faster R-CNN", "1 lighter model with FCOS", "Pretrained backbone kept frozen"]],
+  ["Training", ["40 epochs for every model", "AdamW, learning rate 1e-4, batch 8", "Low-light, infrared-style and occlusion augmentation"]],
+  ["Evaluation", ["After every epoch, on validation", "AP for smoke and fire, mAP@0.5", "Detections at no more than 1% false alarms"]],
+  ["Decision", ["Test set used once, at the end", "Compare accuracy, false alarms, speed, size", "Choose the model to continue with"]],
+];
+const sw = 2.22, sg = 0.25;
+steps.forEach(([h, lines], i) => {
+  const x = 0.6 + i * (sw + sg);
+  card(s, x, 1.5, sw, 3.9);
+  badge(s, x + 0.2, 1.7, i + 1);
+  text(s, h, { x: x + 0.78, y: 1.7, w: sw - 0.9, h: 0.46, fontSize: 18, bold: true, valign: "middle" });
+  text(s, lines.map((l, j) => ({ text: l, options: { bullet: true, breakLine: j < lines.length - 1 } })),
+    { x: x + 0.15, y: 2.45, w: sw - 0.3, h: 2.8, fontSize: 13, paraSpaceAfter: 8 });
+  if (i < steps.length - 1) {
+    s.addShape(pres.shapes.LINE, { x: x + sw + 0.03, y: 1.93, w: sg - 0.06, h: 0,
+      line: { color: HEX.accent6, width: 1.5, endArrowType: "triangle" } });
+  }
+});
+card(s, 0.6, 5.7, 12.1, 1.05);
+text(s, [{ text: "Rule for a fair comparison:  ", options: { bold: true, color: C.accent1 } },
+  { text: "only the part being compared changes. Data, split, augmentation, training settings and measurements are identical for every model, so a difference in results comes from the model." }],
+  { x: 0.85, y: 5.75, w: 11.6, h: 0.95, fontSize: 14, valign: "middle" });
+s.addNotes("Five steps. One: a fixed dataset and split, D-Fire, where almost half the images contain no fire or smoke so that false "
+  + "alarms can be measured. Two: build the candidate models with the pretrained backbone frozen. Three: train each for 40 epochs "
+  + "with identical settings. Four: after every epoch measure accuracy and the alarm behaviour on the validation set, and keep "
+  + "the best epoch. Five: evaluate once on the untouched test set and decide. The rule throughout is that only one thing changes "
+  + "at a time.");
+
 // ---------------------------------------------------------------- 4 backbones at a glance
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
 s.addText("Three backbone candidates", { placeholder: "title" });
