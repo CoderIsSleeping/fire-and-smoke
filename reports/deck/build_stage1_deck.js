@@ -159,36 +159,40 @@ s.addNotes("The detector has a backbone that extracts features, a feature pyrami
 
 // ---------------------------------------------------------------- methodology
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
-s.addText("Methodology: how the models were compared", { placeholder: "title" });
+s.addText("Methodology: how fire and smoke are detected", { placeholder: "title" });
 const steps = [
-  ["Data", ["D-Fire dataset, 21,527 labelled images", "Fixed split: 13,776 train, 3,445 validation, 4,306 test", "45% of images contain no fire or smoke"]],
-  ["Models", ["3 backbones, each with Faster R-CNN", "1 lighter model with FCOS", "Pretrained backbone kept frozen"]],
-  ["Training", ["40 epochs for every model", "AdamW, learning rate 1e-4, batch 8", "Low-light, infrared-style and occlusion augmentation"]],
-  ["Evaluation", ["After every epoch, on validation", "AP for smoke and fire, mAP@0.5", "Detections at no more than 1% false alarms"]],
-  ["Decision", ["Test set used once, at the end", "Compare accuracy, false alarms, speed, size", "Choose the model to continue with"]],
+  ["Data collection", ["21,527 images labelled with boxes for smoke and fire (D-Fire)", "45% show no fire or smoke, so false alarms can be measured"]],
+  ["Pre-processing", ["Each frame resized to 640 x 640, shape kept", "Training images imitate low light, infrared and hidden flames"]],
+  ["Feature extraction", ["A pretrained backbone turns the image into features", "A feature pyramid covers large and small fires"]],
+  ["Detection", ["Detection head: box, class (smoke or fire) and confidence score", "Scene classifier: whole-image check for a hidden fire's glow"]],
+  ["Train and evaluate", ["Transfer learning on the fire data; best epoch kept", "Measured by mAP@0.5 and the false-alarm rate"]],
+  ["Alarm decision", ["Confidence threshold set for at most 1% false alarms", "On video, an alarm needs 6 detections in 15 frames"]],
 ];
-const sw = 2.22, sg = 0.25;
+const sw = 3.85, sgx = 0.275, sh = 2.05, sgy = 0.2;
 steps.forEach(([h, lines], i) => {
-  const x = 0.6 + i * (sw + sg);
-  card(s, x, 1.5, sw, 3.9);
-  badge(s, x + 0.2, 1.7, i + 1);
-  text(s, h, { x: x + 0.78, y: 1.7, w: sw - 0.9, h: 0.46, fontSize: 18, bold: true, valign: "middle" });
+  const col = i % 3, row = Math.floor(i / 3);
+  const x = 0.6 + col * (sw + sgx), y = 1.45 + row * (sh + sgy);
+  card(s, x, y, sw, sh);
+  badge(s, x + 0.22, y + 0.2, i + 1);
+  text(s, h, { x: x + 0.82, y: y + 0.2, w: sw - 1.0, h: 0.46, fontSize: 17, bold: true, valign: "middle" });
   text(s, lines.map((l, j) => ({ text: l, options: { bullet: true, breakLine: j < lines.length - 1 } })),
-    { x: x + 0.15, y: 2.45, w: sw - 0.3, h: 2.8, fontSize: 13, paraSpaceAfter: 8 });
-  if (i < steps.length - 1) {
-    s.addShape(pres.shapes.LINE, { x: x + sw + 0.03, y: 1.93, w: sg - 0.06, h: 0,
+    { x: x + 0.2, y: y + 0.8, w: sw - 0.4, h: sh - 0.9, fontSize: 13, paraSpaceAfter: 5 });
+  if (col < 2) {
+    s.addShape(pres.shapes.LINE, { x: x + sw + 0.03, y: y + 0.43, w: sgx - 0.06, h: 0,
       line: { color: HEX.accent6, width: 1.5, endArrowType: "triangle" } });
   }
 });
-card(s, 0.6, 5.7, 12.1, 1.05);
-text(s, [{ text: "Rule for a fair comparison:  ", options: { bold: true, color: C.accent1 } },
-  { text: "only the part being compared changes. Data, split, augmentation, training settings and measurements are identical for every model, so a difference in results comes from the model." }],
-  { x: 0.85, y: 5.75, w: 11.6, h: 0.95, fontSize: 14, valign: "middle" });
-s.addNotes("Five steps. One: a fixed dataset and split, D-Fire, where almost half the images contain no fire or smoke so that false "
-  + "alarms can be measured. Two: build the candidate models with the pretrained backbone frozen. Three: train each for 40 epochs "
-  + "with identical settings. Four: after every epoch measure accuracy and the alarm behaviour on the validation set, and keep "
-  + "the best epoch. Five: evaluate once on the untouched test set and decide. The rule throughout is that only one thing changes "
-  + "at a time.");
+card(s, 0.6, 5.95, 12.1, 0.8);
+text(s, [{ text: "Input:  ", options: { bold: true, color: C.accent1 } }, { text: "a camera frame          " },
+  { text: "Output:  ", options: { bold: true, color: C.accent1 } },
+  { text: "where the smoke or fire is, how confident the system is, and whether to raise an alarm" }],
+  { x: 0.85, y: 5.95, w: 11.6, h: 0.8, fontSize: 15, valign: "middle" });
+s.addNotes("The method in six steps. One: collect labelled images, including many with no fire, so that false alarms can be measured. "
+  + "Two: resize each frame and, during training, alter the images to imitate the site conditions: low light, infrared cameras, "
+  + "flames hidden behind objects. Three: a pretrained backbone extracts features and a pyramid makes them available at several "
+  + "scales. Four: a detection head outputs boxes with a class and a score, and a scene classifier gives a second opinion on the "
+  + "whole image for hidden fire. Five: train by transfer learning and evaluate with mAP and the false-alarm rate. Six: choose "
+  + "the confidence threshold for very few false alarms, and on video require repeated detections before raising an alarm.");
 
 // ---------------------------------------------------------------- 4 backbones at a glance
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
