@@ -412,6 +412,115 @@ s.addNotes("Four reasons. It is the most accurate. It gives the fewest false ala
   + "requirement. Its features are the best even without training them. And Faster R-CNN gives clean scores. The cost is speed "
   + "and export, which concern deployment, so accuracy is settled first and MobileNetV3 and FCOS are kept for a fast version.");
 
+// ---------------------------------------------------------------- complete structure
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Decision" });
+s.addText("Complete structure of the selected model", { placeholder: "title" });
+{
+  const A = M.dino.arch;
+  const rows = [
+    { t: "Camera frame and pre-processing", sub: "resized to 640 x 640, shape kept", plain: true,
+      d: "The camera frame is resized to 640 x 640 with its shape kept, then normalised." },
+    { t: "Backbone: DINOv3 ViT-S/16", sub: `12 transformer blocks  |  ${mp(A.trunk)} parameters, frozen`,
+      d: "The image becomes 1,600 patch tokens that pass through 12 transformer blocks. Pretrained on 1.689 billion images." },
+    { t: "Feature pyramid", sub: `4 levels, 256 channels  |  ${mp(A.neck)}, trained`,
+      d: "Four feature maps (80, 40, 20 and 10 cells wide), so that both large and small fires are covered." },
+    { split: true },
+    { t: "Alarm logic", sub: "threshold  +  6 detections in 15 frames", plain: true,
+      d: "The threshold is set for at most 1% false alarms. On video, an alarm needs 6 detections within 15 frames." },
+  ];
+  const X = 0.6, W = 5.7, H = 0.74, G = 0.3, Y0 = 1.4;
+  let y = Y0, n = 0;
+  const explain = (num, yy, title, body) => {
+    badge(s, 6.85, yy + 0.14, num, C.accent2, 0.42);
+    text(s, [{ text: title + "  ", options: { bold: true } }, { text: body }],
+      { x: 7.45, y: yy, w: 5.25, h: H, fontSize: 13, valign: "middle" });
+  };
+  rows.forEach((r, i) => {
+    if (r.split) {
+      const hw = (W - 0.25) / 2;
+      [["Detection head: Faster R-CNN", `boxes, class, score  |  ${mp(A.det_head)}, trained`, HEX.accent1],
+       ["Scene classifier", `P(smoke), P(fire)  |  ${mp(A.scene)}, trained`, "6A1B9A"]].forEach(([t, sub, col], j) => {
+        const bx = X + j * (hw + 0.25);
+        s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: bx, y, w: hw, h: H, rectRadius: 0.06, fill: { color: C.background2 }, line: { color: col, width: 1.5 } });
+        s.addText([{ text: t, options: { bold: true, fontSize: 12, color: C.text1, breakLine: true } },
+          { text: sub, options: { fontSize: 10, color: C.accent6 } }],
+          { x: bx + 0.05, y, w: hw - 0.1, h: H, align: "center", valign: "middle", margin: 0, isTextBox: true });
+      });
+      n += 1;
+      badge(s, 6.85, y - 0.02, n, C.accent1, 0.34);
+      text(s, [{ text: "Detection head  ", options: { bold: true } },
+        { text: "Proposes about 300 regions, then classifies each as smoke or fire and refines its box." }],
+        { x: 7.35, y: y - 0.12, w: 5.35, h: 0.5, fontSize: 12, valign: "middle" });
+      n += 1;
+      badge(s, 6.85, y + 0.44, n, C.accent1, 0.34);
+      text(s, [{ text: "Scene classifier  ", options: { bold: true } },
+        { text: "Whole-image check using 7 glow statistics, for fire hidden behind objects." }],
+        { x: 7.35, y: y + 0.36, w: 5.35, h: 0.5, fontSize: 12, valign: "middle" });
+    } else {
+      s.addShape(pres.shapes.ROUNDED_RECTANGLE, { x: X, y, w: W, h: H, rectRadius: 0.06,
+        fill: { color: r.plain ? C.background1 : C.background2 }, line: { color: r.plain ? HEX.accent6 : HEX.accent2, width: 1.5 } });
+      s.addText([{ text: r.t, options: { bold: true, fontSize: 14, color: C.text1, breakLine: true } },
+        { text: r.sub, options: { fontSize: 11, color: C.accent6 } }],
+        { x: X + 0.05, y, w: W - 0.1, h: H, align: "center", valign: "middle", margin: 0, isTextBox: true });
+      n += 1;
+      explain(n, y, r.t.split(":")[0], r.d);
+    }
+    if (i < rows.length - 1) {
+      s.addShape(pres.shapes.LINE, { x: X + W / 2, y: y + H + 0.03, w: 0, h: G - 0.06,
+        line: { color: HEX.accent6, width: 1.5, endArrowType: "triangle" } });
+    }
+    y += H + G;
+  });
+  card(s, 0.6, 6.55, 12.1, 0.36);
+  text(s, [{ text: "Whole model:  ", options: { bold: true, color: C.accent1 } },
+    { text: `${mp(A.total)} parameters, of which ${mp(A.trainable_frozen_trunk)} are trained in stage 1 (the backbone is frozen).` }],
+    { x: 0.85, y: 6.55, w: 11.6, h: 0.36, fontSize: 12, valign: "middle" });
+}
+s.addNotes("The full structure of the model we continue with, top to bottom. The frame is resized to 640 by 640. DINOv3 turns it into "
+  + "1,600 tokens and processes them through 12 transformer blocks; this part has 21.6 million parameters and is frozen. A feature "
+  + "pyramid produces four scales. Then two outputs work side by side: the Faster R-CNN head gives boxes with a class and a score, "
+  + "and the scene classifier gives a whole-image probability for smoke and fire, using glow statistics, for the case where the "
+  + "flame itself is hidden. Finally the alarm logic applies a threshold and, on video, requires six detections in fifteen frames. "
+  + "In total 39.3 million parameters, 17.7 million of them trained in stage 1.");
+
+// ---------------------------------------------------------------- problems faced
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Decision" });
+s.addText("Problems faced up to stage 1, and how they were solved", { placeholder: "title" });
+{
+  const rows = [
+    ["Data shortage: no fire footage from the site",
+     "Used the public D-Fire dataset (21,527 annotated images). Every label was checked, faulty boxes were corrected or filtered, and our own train / validation / test split was made"],
+    ["The dataset is mostly daytime and outdoor",
+     "Augmentation that imitates the site: low light with sensor noise, infrared-style grey images and motion blur"],
+    ["No examples of fire hidden behind objects",
+     "Flames are partly covered during training while the label is kept, and a scene classifier reads 7 glow statistics"],
+    ["False alarms had to be measured, not guessed",
+     "45% of the images contain no fire or smoke; the threshold is set where at most 1% of them trigger a detection"],
+    ["Limited GPU time: free Kaggle sessions with a time limit",
+     "The backbone is frozen, which makes training cheap; a checkpoint is saved after every epoch so a run can resume"],
+    ["DINOv3 gives features at one scale only",
+     "A 4-level feature pyramid was built on top of it, so small and large fires are both covered"],
+  ];
+  text(s, "Problem", { x: 0.6, y: 1.3, w: 4.2, h: 0.35, fontSize: 14, bold: true, color: C.accent4, valign: "middle" });
+  text(s, "How it was solved", { x: 5.35, y: 1.3, w: 7.35, h: 0.35, fontSize: 14, bold: true, color: C.accent3, valign: "middle" });
+  rows.forEach(([p, sol], i) => {
+    const y = 1.72 + i * 0.86;
+    card(s, 0.6, y, 4.2, 0.74);
+    badge(s, 0.75, y + 0.16, i + 1, C.accent4, 0.42);
+    text(s, p, { x: 1.3, y, w: 3.4, h: 0.74, fontSize: 13, bold: true, valign: "middle" });
+    s.addShape(pres.shapes.LINE, { x: 4.86, y: y + 0.37, w: 0.43, h: 0, line: { color: HEX.accent6, width: 1.5, endArrowType: "triangle" } });
+    card(s, 5.35, y, 7.35, 0.74);
+    text(s, sol, { x: 5.55, y, w: 6.95, h: 0.74, fontSize: 13, valign: "middle" });
+  });
+}
+s.addNotes("Six problems met on the way to stage 1. First, data: the site has no recorded fires, so we could not collect fire images "
+  + "there. We used the public D-Fire dataset, which is already annotated with boxes for smoke and fire. Our own work on the data "
+  + "was to check every label file, correct 8 boxes that ran outside the image, filter out 18 zero-area boxes, and create a "
+  + "validation split, keeping the test set untouched. Second, D-Fire is mostly daytime, so we simulate low light and infrared "
+  + "cameras. Third, hidden fire: we cover part of the flame during training and add a scene classifier. Fourth, false alarms: "
+  + "almost half the images have no fire, which lets us measure them. Fifth, compute: freezing the backbone and saving a "
+  + "checkpoint every epoch let us train within free Kaggle sessions. Sixth, DINOv3 outputs one scale, so we built a pyramid.");
+
 // ---------------------------------------------------------------- 11 next goals
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Decision" });
 s.addText("Next goals", { placeholder: "title" });
