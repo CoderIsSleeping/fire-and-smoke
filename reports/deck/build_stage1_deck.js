@@ -7,7 +7,10 @@ const path = require("path");
 const fs = require("fs");
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const OUT = path.join(ROOT, "reports", "Stage1_Model_Selection_Slides.pptx");
+// Optional, git-ignored: team names, guide and annotated sample frames for the presented copy.
+const PRIV_FILE = path.join(ROOT, "Industry", "presentation_private.json");
+const PRIV = fs.existsSync(PRIV_FILE) ? JSON.parse(fs.readFileSync(PRIV_FILE, "utf8")) : null;
+const OUT = PRIV && PRIV.out ? path.join(ROOT, PRIV.out) : path.join(ROOT, "reports", "Stage1_Model_Selection_Slides.pptx");
 const FIG = (n) => path.join(ROOT, "reports", "figures", n);
 const D = JSON.parse(fs.readFileSync(path.join(ROOT, "reports", "data", "stage1_presentation.json"), "utf8"));
 const M = D.models;
@@ -111,6 +114,12 @@ s.addText("Fire and Smoke Detection: Choosing the Model", { placeholder: "title"
 s.addText("Stage 1: three backbones and two detection heads compared over 40 training epochs", { placeholder: "body" });
 text(s, "DINOv3   |   MobileNetV3-Large   |   ResNet-18   |   Faster R-CNN   |   FCOS",
   { x: 0.8, y: 5.6, w: 11.7, h: 0.4, fontSize: 16, color: C.accent1, bold: true });
+if (PRIV) {
+  text(s, [{ text: "Presented by:  ", options: { bold: true } }, { text: PRIV.team.join("   |   ") }],
+    { x: 0.8, y: 6.2, w: 11.7, h: 0.35, fontSize: 14, color: C.background2 });
+  text(s, [{ text: "Guide:  ", options: { bold: true } }, { text: PRIV.guide + "   |   " + PRIV.dept }],
+    { x: 0.8, y: 6.6, w: 11.7, h: 0.35, fontSize: 14, color: C.background2 });
+}
 s.addNotes("Introduce the project: an industrial fire and smoke detector for fixed cameras. Today covers stage 1 only: "
   + "how we compared the candidate models and why we continue with DINOv3 plus Faster R-CNN.");
 
@@ -193,6 +202,36 @@ s.addNotes("The method in six steps. One: collect labelled images, including man
   + "scales. Four: a detection head outputs boxes with a class and a score, and a scene classifier gives a second opinion on the "
   + "whole image for hidden fire. Five: train by transfer learning and evaluate with mAP and the false-alarm rate. Six: choose "
   + "the confidence threshold for very few false alarms, and on video require repeated detections before raising an alarm.");
+
+// ---------------------------------------------------------------- data collection and annotation
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
+s.addText("Data: collection and annotation", { placeholder: "title" });
+{
+  const steps = [
+    ["400+", "online videos of fire, smoke and industrial incidents collected"],
+    ["150+", "videos kept after filtering: surveillance-style view, industrial scene, low or mixed light"],
+    ["2,100", "frames extracted at a fixed interval"],
+    ["2,100", "frames annotated in Roboflow: fire and smoke marked with boxes or polygons"],
+    ["21,527", "images of the public D-Fire benchmark, labels checked; used for the model comparison"],
+  ];
+  steps.forEach(([n, d], i) => {
+    const y = 1.45 + i * 1.02;
+    card(s, 0.6, y, 5.3, 0.88);
+    text(s, n, { x: 0.75, y, w: 1.35, h: 0.88, fontSize: 24, bold: true, color: i === 4 ? C.accent2 : C.accent1, valign: "middle" });
+    text(s, d, { x: 2.15, y, w: 3.65, h: 0.88, fontSize: 13, valign: "middle" });
+  });
+  const imgs = PRIV && PRIV.images ? PRIV.images.map((f) => path.join(ROOT, "Industry", "annotated_samples", f)).filter((f) => fs.existsSync(f)) : [];
+  imgs.slice(0, 6).forEach((f, i) => {
+    const w = 3.2, h = 1.8, x = 6.2 + (i % 2) * (w + 0.1), y = 1.45 + Math.floor(i / 2) * (h + 0.1);
+    s.addImage({ path: f, x, y, w, h });
+  });
+  if (imgs.length) text(s, "Annotated frames from our collection: red = fire, blue or violet = smoke",
+    { x: 6.2, y: 7.0, w: 5.9, h: 0.3, fontSize: 10, color: C.accent6, valign: "middle" });
+}
+s.addNotes("Data shortage was the first problem: there is no fire footage from the site. We collected more than 400 videos online, "
+  + "kept more than 150 that match our conditions, extracted 2,100 frames and annotated all of them in Roboflow with fire and "
+  + "smoke regions. For the model comparison in this presentation every model is trained on the public D-Fire benchmark, so the "
+  + "numbers are comparable with published work; our own frames are for fine-tuning and testing in the next stage.");
 
 // ---------------------------------------------------------------- 4 backbones at a glance
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
@@ -489,7 +528,7 @@ s.addText("Problems faced up to stage 1, and how they were solved", { placeholde
 {
   const rows = [
     ["Data shortage: no fire footage from the site",
-     "Used the public D-Fire dataset (21,527 annotated images). Every label was checked, faulty boxes were corrected or filtered, and our own train / validation / test split was made"],
+     "Collected 400+ online videos, kept 150+, and annotated 2,100 frames in Roboflow. The public D-Fire dataset (21,527 images, labels checked) is used for the benchmark training"],
     ["The dataset is mostly daytime and outdoor",
      "Augmentation that imitates the site: low light with sensor noise, infrared-style grey images and motion blur"],
     ["No examples of fire hidden behind objects",
@@ -514,9 +553,9 @@ s.addText("Problems faced up to stage 1, and how they were solved", { placeholde
   });
 }
 s.addNotes("Six problems met on the way to stage 1. First, data: the site has no recorded fires, so we could not collect fire images "
-  + "there. We used the public D-Fire dataset, which is already annotated with boxes for smoke and fire. Our own work on the data "
-  + "was to check every label file, correct 8 boxes that ran outside the image, filter out 18 zero-area boxes, and create a "
-  + "validation split, keeping the test set untouched. Second, D-Fire is mostly daytime, so we simulate low light and infrared "
+  + "there. We collected and annotated 2,100 frames of our own in Roboflow, and used the public D-Fire dataset for the benchmark "
+  + "training after checking every label file: 8 boxes that ran outside the image were corrected, 18 zero-area boxes are filtered, "
+  + "and we created a validation split, keeping the test set untouched. Second, D-Fire is mostly daytime, so we simulate low light and infrared "
   + "cameras. Third, hidden fire: we cover part of the flame during training and add a scene classifier. Fourth, false alarms: "
   + "almost half the images have no fire, which lets us measure them. Fifth, compute: freezing the backbone and saving a "
   + "checkpoint every epoch let us train within free Kaggle sessions. Sixth, DINOv3 outputs one scale, so we built a pyramid.");
