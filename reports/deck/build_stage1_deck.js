@@ -147,6 +147,45 @@ text(s, [{ text: "Question for stage 1:  ", options: { bold: true, color: C.acce
 s.addNotes("Six requirements from the site. The second one drives most decisions: because the system runs 24/7, the false-alarm "
   + "rate is as important as accuracy. Stage 1 answers one question with measurements: which backbone and which head.");
 
+// ---------------------------------------------------------------- literature review
+s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Introduction" });
+s.addText("Literature review: what exists, and what is missing", { placeholder: "title" });
+{
+  const lit = [
+    ["Colour and motion rules", "Chen 2004; Toreyin 2006; Celik 2009", "Fast, no training data", "Depends on colour; many false alarms"],
+    ["CNN frame classifiers", "Muhammad 2018; Dunnings and Breckon 2018", "Learned features, real time", "Says fire or no fire, not where"],
+    ["Two-stage detectors", "Ren 2015 (Faster R-CNN); Zhang 2018", "Accurate boxes, clear scores", "Heavier head"],
+    ["One-stage detectors", "Tian 2019 (FCOS); de Venancio 2022 (D-Fire)", "Simple, fixed-shape output", "Daytime data; false alarms unreported"],
+    ["CNN backbones", "He 2016 (ResNet); Howard 2019 (MobileNetV3)", "Efficient, several scales", "ImageNet features, local view"],
+    ["Self-supervised transformers", "Caron 2021 (DINO); Simeoni 2025 (DINOv3); Li 2022", "General features, no labels needed", "Slower; hardly tried for fire"],
+  ];
+  const f = { fontSize: 12 };
+  s.addTable([
+    [head("Approach", f), head("Representative work", f), head("Strength", f), head("Limitation for our task", f)],
+    ...lit.map(([a, w, st, li]) => [cell(a, { fontSize: 12, bold: true }), cell(w, { fontSize: 11, color: HEX.accent6 }), cell(st, f), cell(li, f)]),
+  ], Object.assign({ x: 0.6, y: 1.35, w: 7.9, colW: [1.75, 2.45, 1.75, 1.95], rowH: 0.62 }, TABLE));
+  text(s, "Gaps we address", { x: 8.85, y: 1.35, w: 3.85, h: 0.4, fontSize: 16, bold: true, color: C.accent1, valign: "middle" });
+  const gaps = [
+    ["False alarms are not measured", "we report the false-alarm rate with accuracy"],
+    ["Data does not match industrial scenes", "low-light and infrared-style augmentation"],
+    ["Hidden fire is not handled", "scene classifier with glow statistics"],
+    ["Self-supervised backbones hardly tried for fire", "DINOv3 evaluated"],
+    ["No equal-conditions comparison", "3 backbones, 2 heads, same data and settings"],
+  ];
+  gaps.forEach(([g, a], i) => {
+    const y = 1.85 + i * 0.95;
+    card(s, 8.85, y, 3.85, 0.83);
+    badge(s, 8.97, y + 0.22, i + 1, C.accent1, 0.38);
+    text(s, [{ text: g, options: { bold: true, fontSize: 12, breakLine: true } }, { text: a, options: { fontSize: 11, color: C.accent6 } }],
+      { x: 9.47, y, w: 3.15, h: 0.83, valign: "middle" });
+  });
+}
+s.addNotes("Summary of the literature survey; the full survey with 24 references is in the report. Early methods used colour and "
+  + "motion rules: fast, but any orange object triggers them. CNN classifiers learn features but only say whether a frame has fire. "
+  + "Detectors give boxes: two-stage ones such as Faster R-CNN are accurate with clear scores, one-stage ones such as FCOS are "
+  + "simpler. The D-Fire paper gave a public dataset. Backbones are mostly ImageNet CNNs; self-supervised transformers such as "
+  + "DINOv3 give general features but have hardly been tried for fire. Five gaps follow, and each one is something our work addresses.");
+
 // ---------------------------------------------------------------- 3 approach
 pres.addSection({ title: "Models" });
 s = pres.addSlide({ masterName: "CONTENT", sectionTitle: "Models" });
