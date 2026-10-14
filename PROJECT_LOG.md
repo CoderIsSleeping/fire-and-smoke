@@ -839,6 +839,35 @@ table, video benchmark, false alarms).
 
 ---
 
+## 6j. First GPU measurement (Model 6, Kaggle Tesla T4)
+
+Decision (2026-10-13): the project continues with DINOv3 only; MobileNetV3 and
+FCOS are no longer candidates. Speed has to come from the GPU, batching and
+export, not from a different backbone.
+
+`scripts/benchmark_throughput.py` on Model 6 (DINOv3 ViT-S + Faster R-CNN),
+AMP on, 300 proposals:
+
+| size | batch 1 | batch 4 | batch 8 |
+|---|---|---|---|
+| 896 px | 20.1 fps (49.9 ms) | 24.6 fps | 24.7 fps (40.5 ms) |
+| 640 px | 39.3 fps (25.5 ms) | 49.4 fps | 50.3 fps (19.9 ms) |
+
+CPU gate: frame difference 0.10 ms, glow features 4.5 ms per frame (one core).
+
+What it means:
+- Batching helps little at 896 px (+23%), so the T4 is already compute-bound
+  there; more batching will not rescue it.
+- Every-frame operation (700 fps) would need about 14 T4s at 640 px. Not viable,
+  as expected.
+- Cascade (gate + 0.5 fps guaranteed sweep, 49 fps to the detector): about one T4
+  at 640 px, about two T4s at 896 px. Model 6 was trained at 896 px for small
+  fires, so 896 px is the setting that matters.
+- The T4 is an entry-level inference GPU. The figure for the deployment GPU must
+  be measured on that GPU; no number is claimed for it here.
+- Next speed lever, if needed: TensorRT fp16 export of the backbone and pyramid
+  (about two thirds of the compute), with the Faster R-CNN head left in PyTorch.
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
