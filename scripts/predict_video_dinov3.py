@@ -52,7 +52,14 @@ ALARM_COLOR = (0, 0, 235)
 
 
 
-def detect_multiscale(model, rgb, scales, device, use_amp=False):
+def tile_origins(length: int, tile: int, n: int) -> list[int]:
+    """n start positions of tiles of size `tile` covering `length`, evenly spread."""
+    if n <= 1 or tile >= length:
+        return [0]
+    return [round(i * (length - tile) / (n - 1)) for i in range(n)]
+
+
+def detect_multiscale(model, rgb, scales, device, use_amp=False, tiles=0, tile_overlap=0.2, tile_max_frac=0.35):
     """Run the detector at one or more input sizes and merge the boxes.
 
     Small, distant fires shrink below what the model can see when a 1920 px
@@ -62,6 +69,13 @@ def detect_multiscale(model, rgb, scales, device, use_amp=False):
     mid-size one fell to ~0.5 (the model was trained at 640). Merging both
     sizes caught all three with no extra detections anywhere else. The first
     size is the base: its scene-head output is the one reported.
+
+    `tiles` = n adds an n x n grid of overlapping crops of the original frame,
+    each run at the base size, so a 43 px fire in a 1920 px frame is seen at
+    close to its own size instead of being shrunk to ~20 px. Only boxes smaller
+    than `tile_max_frac` of a tile are kept from the tiles (large objects come
+    from the full-frame pass, and a big flame cut by a tile edge would
+    otherwise leave a fragment). The tiles go through the model as one batch.
 
     Returns boxes in original-frame pixels (before clean_boxes), scores,
     labels and the base scale's scene probabilities.
@@ -81,10 +95,36 @@ def detect_multiscale(model, rgb, scales, device, use_amp=False):
         all_labels.append(det["labels"].cpu().numpy())
         if scene is None:
             scene = scene_probs[0].float().cpu().numpy()
+    if tiles and tiles > 1:
+        size = scales[0]
+        transform.min_size, transform.max_size = (size,), size
+        h, w = rgb.shape[:2]
+        tw = min(w, int(w / (tiles - (tiles - 1) * tile_overlap)))
+        th = min(h, int(h / (tiles - (tiles - 1) * tile_overlap)))
+        crops, metas = [], []
+        for y0 in tile_origins(h, th, tiles):
+            for x0 in tile_origins(w, tw, tiles):
+                canvas, meta = letterbox(np.ascontiguousarray(rgb[y0:y0 + th, x0:x0 + tw]), size)
+                crops.append(canvas)
+                metas.append((x0, y0, meta))
+        tensors = [torch.from_numpy(c.transpose(2, 0, 1).copy()).float().div_(255.0).to(device) for c in crops]
+        glow_vector = torch.from_numpy(np.stack([glow_features(c) for c in crops])).to(device)
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            detections, _ = model(tensors, glow=glow_vector)
+        limit = tile_max_frac * min(tw, th)
+        for det, (x0, y0, (ratio, pad_left, pad_top)) in zip(detections, metas):
+            b = undo_letterbox(det["boxes"].float().cpu().numpy(), ratio, pad_left, pad_top)
+            if not len(b):
+                continue
+            small = np.maximum(b[:, 2] - b[:, 0], b[:, 3] - b[:, 1]) <= limit
+            all_boxes.append(b[small] + np.array([x0, y0, x0, y0], np.float32))
+            all_scores.append(det["scores"].float().cpu().numpy()[small])
+            all_labels.append(det["labels"].cpu().numpy()[small])
+
     boxes = np.concatenate(all_boxes).astype(np.float32)
     scores = np.concatenate(all_scores).astype(np.float32)
     labels = np.concatenate(all_labels)
-    if len(scales) > 1 and len(scores):
+    if (len(scales) > 1 or (tiles and tiles > 1)) and len(scores):
         from torchvision.ops import batched_nms
 
         keep = batched_nms(torch.from_numpy(boxes), torch.from_numpy(scores), torch.from_numpy(labels), 0.5).numpy()
@@ -110,6 +150,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scales", default=None,
                    help="Comma-separated input sizes to run and merge, e.g. 640,960. Helps small, "
                         "distant fires; costs one extra pass per size.")
+    p.add_argument("--tiles", type=int, default=0,
+                   help="Also run an N x N grid of overlapping crops at full detail (2 = four tiles). "
+                        "For small, distant fires in high-resolution frames; costs N*N extra passes.")
     p.add_argument("--device", default="auto")
     p.add_argument("--stride", type=int, default=1, help="Run the model every Nth frame; others reuse the last result.")
     p.add_argument("--max-frames", type=int, default=0)
@@ -123,6 +166,9 @@ def parse_args() -> argparse.Namespace:
     alarm.add_argument("--exit-hits", type=int, default=2, help="Hits needed to keep an alarm up (hysteresis).")
     alarm.add_argument("--iou-match", type=float, default=0.20, help="IoU for linking a detection to a track.")
     alarm.add_argument("--max-age", type=int, default=20, help="Frames a track survives without any evidence.")
+    alarm.add_argument("--track-conf", type=float, default=None,
+                       help="Raise the alarm when the MEAN score of the hits reaches this (hits then only need "
+                            "--conf). Off by default.")
 
     occluded = p.add_argument_group("occluded-fire cue")
     occluded.add_argument("--scene-conf", type=float, default=0.60, help="Scene-head probability to trust.")
@@ -342,6 +388,8 @@ def main() -> None:
     title = f"{args.label + ':  ' if args.label else ''}{trunk} + {head}  ({params:.1f}M)"
     if len(scales) > 1:
         title += f"  @{'+'.join(map(str, scales))}px"
+    if args.tiles > 1:
+        title += f"  +{args.tiles}x{args.tiles} tiles"
     latencies: list[float] = []
     use_amp = args.amp and device.type == "cuda"
 
@@ -390,6 +438,7 @@ def main() -> None:
         exit_conf=args.exit_conf,
         iou_match=args.iou_match,
         max_age=args.max_age,
+        track_conf=args.track_conf,
     )
     scene_confirmers = {
         "smoke": ScalarConfirmer(args.window, args.enter_hits + 2, args.exit_hits + 1, args.scene_conf, args.scene_conf - 0.15),
@@ -429,7 +478,8 @@ def main() -> None:
         if frame_index % args.stride == 0:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             infer_started = time.perf_counter()
-            boxes, scores, labels, scene_vector = detect_multiscale(model, rgb, scales, device, use_amp)
+            boxes, scores, labels, scene_vector = detect_multiscale(model, rgb, scales, device, use_amp,
+                                                                    tiles=args.tiles)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             latencies.append(time.perf_counter() - infer_started)

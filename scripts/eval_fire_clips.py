@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scales", default=None, help="Comma-separated input sizes, e.g. 640,960.")
     p.add_argument("--conf", default="0.80", help="Alarm threshold(s), comma-separated: each gets its own "
                                                   "6-of-15 confirmation, from one pass over the video.")
+    p.add_argument("--tiles", type=int, default=0, help="N x N tile grid on top of the full frame (see predict_video).")
+    p.add_argument("--track-conf", action="store_true",
+                   help="Treat each --conf value as a mean-score threshold over the hits of a track; a hit then "
+                        "only needs --evidence-conf.")
+    p.add_argument("--evidence-conf", type=float, default=0.50)
     p.add_argument("--window", type=int, default=15)
     p.add_argument("--enter-hits", type=int, default=6)
     p.add_argument("--stride", type=int, default=5, help="Run the model every Nth frame.")
@@ -72,8 +77,13 @@ def run_clip(model, clip: dict, args, device, scales) -> dict:
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     confs = args.confs
-    confirmers = {c: TemporalConfirmer({1: "smoke", 2: "fire"}, window=args.window, enter_hits=args.enter_hits,
-                                       exit_hits=2, enter_conf=c, exit_conf=c - 0.15) for c in confs}
+    if args.track_conf:
+        confirmers = {c: TemporalConfirmer({1: "smoke", 2: "fire"}, window=args.window, enter_hits=args.enter_hits,
+                                           exit_hits=2, enter_conf=args.evidence_conf,
+                                           exit_conf=args.evidence_conf - 0.15, track_conf=c) for c in confs}
+    else:
+        confirmers = {c: TemporalConfirmer({1: "smoke", 2: "fire"}, window=args.window, enter_hits=args.enter_hits,
+                                           exit_hits=2, enter_conf=c, exit_conf=c - 0.15) for c in confs}
     fires = clip["fires"]
     per_fire = {f["id"]: {"scores": [], "alarm_t": {c: None for c in confs}} for f in fires}
     false_alarms = {c: [] for c in confs}
@@ -89,7 +99,7 @@ def run_clip(model, clip: dict, args, device, scales) -> dict:
             t = index / fps
             h, w = frame.shape[:2]
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            boxes, scores, labels, _ = detect_multiscale(model, rgb, scales, device)
+            boxes, scores, labels, _ = detect_multiscale(model, rgb, scales, device, tiles=args.tiles)
             boxes, scores, labels = clean_boxes(boxes, scores, labels, w, h, 4.0)
 
             for f in fires:
@@ -137,8 +147,10 @@ def main() -> None:
     gt = json.loads(Path(args.gt).read_text(encoding="utf-8"))
     args.confs = [float(v) for v in str(args.conf).split(",")]
 
-    print(f"weights {args.weights} | scales {scales} | alarm {args.enter_hits}-of-{args.window} at "
-          f"conf >= {args.confs} | every {args.stride} frames")
+    mode = (f"mean hit score >= {args.confs}, hits >= {args.evidence_conf}" if args.track_conf
+            else f"conf >= {args.confs}")
+    print(f"weights {args.weights} | scales {scales} | tiles {args.tiles} | alarm {args.enter_hits}-of-{args.window} "
+          f"at {mode} | every {args.stride} frames")
     results = [run_clip(model, clip, args, device, scales) for clip in gt["clips"]]
 
     conf_cols = "".join(f" {'alarm@' + str(c):>12s}" for c in args.confs)

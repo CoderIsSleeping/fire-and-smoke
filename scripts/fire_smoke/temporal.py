@@ -13,6 +13,12 @@ headlight, a welding flash and a bird are not. So the alarm requires:
   3. and once raised, the alarm only clears when the evidence drops below
      `exit_hits` (hysteresis, so a momentarily obscured flame does not toggle).
 
+Optional track-level confidence (`track_conf`): instead of demanding that every
+hit clear one high per-frame threshold, a hit only needs `enter_conf` and the
+alarm needs the *mean* score of the hits in the window to reach `track_conf`.
+A distant fire that scores 0.85 in every frame is stronger evidence than one
+frame at 0.92; a per-frame cut at 0.90 throws that evidence away.
+
 Everything here is intentionally simple and inspectable -- a supervisor can be
 told "six confirmed detections of the same thing within three seconds" and
 understand what the alarm means.
@@ -45,13 +51,19 @@ class Track:
     box: np.ndarray
     last_frame: int
     hits: deque = field(default_factory=deque)
+    hit_scores: deque = field(default_factory=deque)
     score: float = 0.0
     confirmed: bool = False
 
     def recent_hits(self, frame_index: int, window: int) -> int:
         while self.hits and self.hits[0] <= frame_index - window:
             self.hits.popleft()
+            if self.hit_scores:
+                self.hit_scores.popleft()
         return len(self.hits)
+
+    def mean_hit_score(self) -> float:
+        return float(np.mean(self.hit_scores)) if self.hit_scores else 0.0
 
 
 @dataclass
@@ -79,6 +91,7 @@ class TemporalConfirmer:
         iou_match: float = 0.20,
         max_age: int = 20,
         box_smoothing: float = 0.6,
+        track_conf: float | None = None,
     ) -> None:
         self.class_names = class_names
         self.window = window
@@ -89,6 +102,7 @@ class TemporalConfirmer:
         self.iou_match = iou_match
         self.max_age = max_age
         self.box_smoothing = box_smoothing
+        self.track_conf = track_conf
 
         self.tracks: list[Track] = []
         self.frame_index = -1
@@ -127,9 +141,10 @@ class TemporalConfirmer:
                 best_track.last_frame = frame
                 if score >= self.enter_conf:
                     best_track.hits.append(frame)
+                    best_track.hit_scores.append(score)
                 claimed.add(id(best_track))
             elif score >= self.enter_conf:
-                track = Track(self._next_id, label, box, frame, deque([frame]), score)
+                track = Track(self._next_id, label, box, frame, deque([frame]), deque([score]), score)
                 self._next_id += 1
                 self.tracks.append(track)
                 claimed.add(id(track))
@@ -142,7 +157,8 @@ class TemporalConfirmer:
             if track.confirmed:
                 track.confirmed = hits >= self.exit_hits
             else:
-                track.confirmed = hits >= self.enter_hits
+                track.confirmed = hits >= self.enter_hits and (
+                    self.track_conf is None or track.mean_hit_score() >= self.track_conf)
             if track.confirmed:
                 alarms.append(
                     Alarm(
