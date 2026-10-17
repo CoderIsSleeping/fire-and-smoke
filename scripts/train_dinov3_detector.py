@@ -33,7 +33,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from fire_smoke import CLASS_NAMES
@@ -103,6 +103,10 @@ def parse_args() -> argparse.Namespace:
     aug.add_argument("--paste-min", type=float, default=8.0)
     aug.add_argument("--paste-max", type=float, default=40.0)
     aug.add_argument("--no-augment", action="store_true", help="Disable all augmentation (ablation baseline).")
+    aug.add_argument("--small-fire-repeat", type=float, default=1.0,
+                     help="Draw training images that contain a small fire this many times as often (1 = off).")
+    aug.add_argument("--small-fire-px", type=float, default=32.0,
+                     help="A fire box counts as small when its longer side is at most this many pixels at --imgsz.")
 
     run = p.add_argument_group("run")
     run.add_argument("--device", default="auto")
@@ -119,6 +123,27 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--seed", type=int, default=0)
     run.add_argument("--zip", action="store_true", help="Zip the run directory when finished (handy on Kaggle).")
     return p.parse_args()
+
+
+def small_fire_flags(dataset, image_size: int, max_px: float) -> list[bool]:
+    """True for each image holding a fire box whose longer side, after letterboxing to
+    image_size, is at most max_px. Reads image headers only."""
+    from PIL import Image
+
+    flags = []
+    for image_path in dataset.images:
+        label = dataset.label_path(image_path)
+        small = False
+        if label.exists():
+            fires = [l.split() for l in label.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if l.split()[:1] in (["1"], ["1.0"])]
+            if fires:
+                with Image.open(image_path) as im:
+                    w, h = im.size
+                scale = image_size / max(w, h)
+                small = any(max(float(f[3]) * w, float(f[4]) * h) * scale <= max_px for f in fires if len(f) == 5)
+        flags.append(small)
+    return flags
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -345,8 +370,17 @@ def main() -> None:
         print(f"  {name}: {summary[name]}")
     (out_dir / "dataset_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
+    sampler = None
+    if args.small_fire_repeat > 1:
+        flags = small_fire_flags(train_ds, args.imgsz, args.small_fire_px)
+        weights = torch.where(torch.tensor(flags), float(args.small_fire_repeat), 1.0)
+        sampler = WeightedRandomSampler(weights.double(), num_samples=len(train_ds), replacement=True,
+                                        generator=torch.Generator().manual_seed(args.seed))
+        share = float(weights[torch.tensor(flags)].sum() / weights.sum()) if any(flags) else 0.0
+        print(f"sampling  : {sum(flags)} of {len(flags)} train images have a fire <= {args.small_fire_px:g}px; "
+              f"drawn x{args.small_fire_repeat:g} ({share:.0%} of each epoch)")
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch, shuffle=True, num_workers=args.workers,
+        train_ds, batch_size=args.batch, shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
         collate_fn=collate_fn, pin_memory=device.type == "cuda", drop_last=True,
         persistent_workers=args.workers > 0,
     )

@@ -81,6 +81,9 @@ def parse_args() -> argparse.Namespace:
                    help="Cap on box-free images kept per source (-1 = same as positives, 0 = none).")
     p.add_argument("--only-with-fire", action="store_true",
                    help="Keep positives only if they contain fire (use to fix the fire/smoke image imbalance).")
+    p.add_argument("--negatives-only", action="store_true",
+                   help="Take only images with no fire/smoke box from the sources (e.g. a hard-hat dataset with "
+                        "every class mapped to negative). Cap them with --max-negatives-per-source.")
     p.add_argument("--copy-base", action="store_true", help="Copy base files instead of linking them.")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
@@ -372,7 +375,12 @@ def main() -> None:
 
         # hard negatives (from a 'negative' class like DFS 'other') first
         negatives.sort(key=lambda t: not t[1])
-        neg_cap = len(positives) if args.max_negatives_per_source < 0 else args.max_negatives_per_source
+        if args.negatives_only:
+            stats["skipped_positive"] = len(positives)
+            positives = []
+            neg_cap = len(negatives) if args.max_negatives_per_source < 0 else args.max_negatives_per_source
+        else:
+            neg_cap = len(positives) if args.max_negatives_per_source < 0 else args.max_negatives_per_source
         kept = Counter()
         for kind, pool, cap in (("positive", positives, args.max_per_source or len(positives)),
                                 ("negative", negatives, neg_cap)):
