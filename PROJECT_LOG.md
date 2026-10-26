@@ -922,6 +922,34 @@ helmets come from the same dataset as the training helmets, so this is an
 in-distribution result; site helmets (camera height, lighting) still need
 checking on the site footage, locally only.
 
+## 6l. Multi-camera load test (Model 7, Kaggle T4, 896 px)
+
+`scripts/multicam_stress.py`: simulated 1920x1080 cameras at 10 fps, each
+keeping only its newest frame; one shared model, batches of up to 8. D-Fire
+test images stand in for camera frames (no site footage on cloud GPUs).
+
+| Mode | Total fps | Cameras that keep up | Bar |
+|---|---|---|---|
+| Round-robin, frames prepared serially | ~15 | 7 | every camera >= 2 checks/s, p95 latency <= 1 s |
+| Round-robin, preparation overlapped with GPU (thread pool) | ~20.6 | 10 | same |
+| Adaptive (quiet 0.5/s, active 2/s, 2 fire cameras) | ~20 | 10 (20 just misses) | fire cams >= 1.8/s, quiet gap p95 <= 3 s |
+
+Adaptive detail: at 20 cameras fire cameras got 1.75 checks/s (bar 1.8) and
+quiet cameras 2.2 s; at 30+ the GPU is saturated (~20 fps) and fire cameras
+drop to 1.27 -> 0.38 checks/s. False wake-ups on D-Fire negatives (5 of 28 at
+30 cameras, 15 of 68 at 70) each cost 1.5 extra checks/s, so false-alarm
+reduction is also a capacity lever.
+
+Findings: latency stays under 1 s at every count (latest-frame rule works);
+the T4 ceiling at 896 px is ~20 fps in practice (25 in the bare benchmark);
+CPU preparation was a real bottleneck (+37% when overlapped). Known scheduler
+inefficiency: next check is scheduled from dispatch time, so the pipeline
+delay stretches a 0.5 s period to ~0.57 s; fixed-rate scheduling would let 20
+cameras pass. Not fixed yet (paused by decision). Levers for 70 cameras, in
+order: fixed-rate scheduling; quiet checks at 640 px and active at 896 px;
+fewer false wake-ups; camera substreams + NVDEC; TensorRT fp16; a stronger
+GPU (L4 / RTX 5070, to be measured); more GPUs.
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
