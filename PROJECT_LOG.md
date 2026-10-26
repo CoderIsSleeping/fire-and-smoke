@@ -868,6 +868,41 @@ What it means:
 - Next speed lever, if needed: TensorRT fp16 export of the backbone and pyramid
   (about two thirds of the compute), with the Faster R-CNN head left in PyTorch.
 
+## 6k. Model 7: hard negatives + small-fire oversampling
+
+Init from Model 6; same 896 px / mosaic 0.3 / 2 unfrozen blocks, lr 2e-5, 6 epochs
+(~31 min/epoch on Kaggle). Training set = D-Fire + 2,508 negatives added with
+`merge_extra_datasets.py --negatives-only` (1,008 DFS `other`: lamps, sunsets,
+fire-coloured objects; 1,500 hard-hat worker images with every label mapped to
+negative; 26 near-copies of D-Fire images removed, 5 of them test images).
+`--small-fire-repeat 3`: the 1,235 training images with a fire <= 32 px at 896
+make up ~20% of each epoch instead of ~8%. Best val 0.7401 (epoch 4).
+
+Test split, Model 6 -> Model 7 (`reports/data/m7_negs_smallfire_eval_test.md`):
+
+| | Model 6 | Model 7 |
+|---|---|---|
+| mAP@0.5 | 0.7291 | 0.7301 |
+| fire tiny AP / rec@0.8 / median conf | 0.385 / 0.307 / 0.785 | 0.377 / **0.358** / **0.816** |
+| fire small AP / rec@0.9 / median conf | 0.667 / 0.407 / 0.870 | **0.675** / **0.421** / **0.888** |
+| smoke tiny AP (66 boxes) | 0.356 | 0.316 |
+| FP images at 0.90 / 0.93 / 0.95 | 27 / 20 / 9 | 26 / 18 / 7 |
+| recall (any) at 0.90 | 0.867 | 0.867 |
+| scene head fire FPR | 0.016 | 0.027 |
+
+Reading:
+- **Small-fire confidence went up**, which was the point: median score on
+  tiny fires +0.03, share of tiny fires above 0.8 +5 points, small fires above
+  0.9 +1.4 points. Tiny-fire AP is flat (-0.008), so ranking did not improve,
+  the scores did.
+- **False alarms on D-Fire negatives barely moved** (27 -> 26 at 0.90). That is
+  not evidence either way about helmets: D-Fire negatives contain few helmets
+  or hi-vis. The helmet effect has to be measured on held-out hard-hat images
+  (`scripts/eval_negatives.py`, 3,500 images not used in training) and on the
+  site footage.
+- Costs to watch: tiny-smoke AP fell (only 66 boxes, noisy) and the scene head
+  fire FPR rose from 1.6% to 2.7%.
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
