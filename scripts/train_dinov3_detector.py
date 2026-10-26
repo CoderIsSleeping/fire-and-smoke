@@ -107,6 +107,10 @@ def parse_args() -> argparse.Namespace:
                      help="Draw training images that contain a small fire this many times as often (1 = off).")
     aug.add_argument("--small-fire-px", type=float, default=32.0,
                      help="A fire box counts as small when its longer side is at most this many pixels at --imgsz.")
+    aug.add_argument("--repeat-list", default=None,
+                     help="Text file of training image names (one per line, first column) to draw more often, "
+                          "e.g. the hard negatives found by mine_hard_negatives.py.")
+    aug.add_argument("--repeat-factor", type=float, default=3.0, help="How much more often --repeat-list images are drawn.")
 
     run = p.add_argument_group("run")
     run.add_argument("--device", default="auto")
@@ -371,14 +375,24 @@ def main() -> None:
     (out_dir / "dataset_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     sampler = None
+    weights = torch.ones(len(train_ds), dtype=torch.float64)
     if args.small_fire_repeat > 1:
-        flags = small_fire_flags(train_ds, args.imgsz, args.small_fire_px)
-        weights = torch.where(torch.tensor(flags), float(args.small_fire_repeat), 1.0)
-        sampler = WeightedRandomSampler(weights.double(), num_samples=len(train_ds), replacement=True,
+        flags = torch.tensor(small_fire_flags(train_ds, args.imgsz, args.small_fire_px))
+        weights[flags] *= args.small_fire_repeat
+        print(f"sampling  : {int(flags.sum())} of {len(flags)} train images have a fire <= {args.small_fire_px:g}px; "
+              f"drawn x{args.small_fire_repeat:g} ({float(weights[flags].sum() / weights.sum()):.0%} of each epoch)")
+    if args.repeat_list:
+        wanted = {line.split()[0] for line in Path(args.repeat_list).read_text(encoding="utf-8").splitlines()
+                  if line.strip() and not line.startswith("#")}
+        hits = torch.tensor([p.stem in wanted or p.name in wanted for p in train_ds.images])
+        if not hits.any():
+            raise SystemExit(f"none of the {len(wanted)} names in {args.repeat_list} is a training image")
+        weights[hits] *= args.repeat_factor
+        print(f"sampling  : {int(hits.sum())} images from {args.repeat_list} drawn x{args.repeat_factor:g} "
+              f"({float(weights[hits].sum() / weights.sum()):.0%} of each epoch)")
+    if (weights != 1).any():
+        sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True,
                                         generator=torch.Generator().manual_seed(args.seed))
-        share = float(weights[torch.tensor(flags)].sum() / weights.sum()) if any(flags) else 0.0
-        print(f"sampling  : {sum(flags)} of {len(flags)} train images have a fire <= {args.small_fire_px:g}px; "
-              f"drawn x{args.small_fire_repeat:g} ({share:.0%} of each epoch)")
     train_loader = DataLoader(
         train_ds, batch_size=args.batch, shuffle=sampler is None, sampler=sampler, num_workers=args.workers,
         collate_fn=collate_fn, pin_memory=device.type == "cuda", drop_last=True,
