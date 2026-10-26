@@ -38,6 +38,7 @@ import json
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -66,6 +67,9 @@ def parse_args() -> argparse.Namespace:
                    help="Distinct frames held in memory per camera when using --image-folder.")
     p.add_argument("--imgsz", type=int, default=0, help="Model input size (default: the checkpoint's).")
     p.add_argument("--max-batch", type=int, default=8)
+    p.add_argument("--prep-workers", type=int, default=4, help="CPU threads preparing frames.")
+    p.add_argument("--no-prefetch", dest="prefetch", action="store_false", default=True,
+                   help="Prepare each batch only after the previous one finished (the old, serial loop).")
     p.add_argument("--duration", type=float, default=40.0, help="Measured seconds per camera count.")
     p.add_argument("--warmup", type=float, default=8.0, help="Unmeasured seconds before each measurement.")
     p.add_argument("--min-camera-fps", type=float, default=2.0)
@@ -143,6 +147,25 @@ def load_image_frames(folder: str, n_cams: int, per_cam: int, size: tuple[int, i
     return [frames[c::n_cams] or frames for c in range(n_cams)]
 
 
+def prepare(frame: np.ndarray, size: int):
+    """CPU side of one frame: colour conversion, letterbox, glow statistics."""
+    canvas, _ = letterbox(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), size)
+    return np.ascontiguousarray(canvas.transpose(2, 0, 1)), glow_features(canvas)
+
+
+def run_batch(model, device, use_amp, batch, prepared):
+    items = [f.result() for f in prepared]
+    tensors = [torch.from_numpy(chw).to(device, non_blocking=True).float().div_(255.0) for chw, _ in items]
+    glow = torch.from_numpy(np.stack([g for _, g in items])).to(device)
+    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+        detections, _ = model(tensors, glow=glow)
+    for det in detections:
+        det["boxes"].cpu()   # results are back on the host before the clock stops
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    return detections
+
+
 def run_count(model, device, use_amp, size, n, args, frame_sets):
     transform = model.detector.transform
     transform.min_size, transform.max_size = (size,), size
@@ -162,6 +185,8 @@ def run_count(model, device, use_amp, size, n, args, frame_sets):
     t_end = t_measure + args.duration
     produced_at_measure = [0] * n
     next_cam = 0
+    pending = None
+    pool = ThreadPoolExecutor(max_workers=args.prep_workers)
     while True:
         now = time.perf_counter()
         if now >= t_end:
@@ -178,34 +203,29 @@ def run_count(model, device, use_amp, size, n, args, frame_sets):
             i = (next_cam + k) % n
             got = cams[i].take(last_seq[i])
             if got is not None:
+                last_seq[i] = got[0]
                 batch.append((i, got))
             if len(batch) >= args.max_batch:
                 break
         next_cam = (next_cam + 1) % n
-        if not batch:
+        if not batch and pending is None:
             time.sleep(0.001)
             continue
-        tensors, glows = [], []
-        for _, (_, _, frame) in batch:
-            canvas, _ = letterbox(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), size)
-            tensors.append(torch.from_numpy(canvas.transpose(2, 0, 1).copy()).to(device).float().div_(255.0))
-            glows.append(glow_features(canvas))
-        glow = torch.from_numpy(np.stack(glows)).to(device)
-        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-            detections, _ = model(tensors, glow=glow)
-        for det in detections:
-            det["boxes"].cpu()   # results are back on the host before the clock stops
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        done = time.perf_counter()
-        for i, (seq, captured, _) in batch:
-            last_seq[i] = seq
+        # CPU preparation of this batch runs in the pool while the GPU works on the previous one
+        prepared = [pool.submit(prepare, frame, size) for _, (_, _, frame) in batch] if batch else None
+        if not args.prefetch and batch:
+            pending, prepared, batch = (batch, prepared), None, []
+        if pending is not None:
+            done_batch, n_done = run_batch(model, device, use_amp, *pending), len(pending[0])
+            done = time.perf_counter()
             if measuring:
-                analysed[i] += 1
-                latencies.append((done - captured) * 1000.0)
-        if measuring:
-            batch_sizes.append(len(batch))
+                for i, (_, captured, _) in pending[0]:
+                    analysed[i] += 1
+                    latencies.append((done - captured) * 1000.0)
+                batch_sizes.append(n_done)
+        pending = (batch, prepared) if batch else None
 
+    pool.shutdown(wait=True)
     for c in cams:
         c.running = False
     for c in cams:
@@ -249,7 +269,8 @@ def main() -> None:
 
     gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU"
     print(f"device {gpu} | input {size}px | amp {use_amp} | cameras at {args.camera_fps:g} fps, {w}x{h} | "
-          f"max batch {args.max_batch} | {args.duration:g}s per count after {args.warmup:g}s warm-up")
+          f"max batch {args.max_batch} | prefetch {args.prefetch} ({args.prep_workers} CPU threads) | "
+          f"{args.duration:g}s per count after {args.warmup:g}s warm-up")
     print(f"keeps up = every camera analysed >= {args.min_camera_fps:g}/s and p95 latency <= {args.max_latency_ms:g} ms\n")
     header = (f"{'cams':>4} {'total fps':>9} {'min fps/cam':>11} {'mean fps/cam':>12} {'p50 ms':>7} {'p95 ms':>7} "
               f"{'coverage':>8} {'batch':>5} {'GPU GB':>6}  result")
