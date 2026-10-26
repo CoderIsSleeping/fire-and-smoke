@@ -27,6 +27,18 @@ Sources (all simulated cameras loop their source):
     python scripts/multicam_stress.py --weights best.pt \\
         --image-folder /kaggle/input/.../images/test --cameras 2,3,4,5,6,7,8,9,10
 
+Adaptive mode (--adaptive) is the 70-camera design: a quiet camera is checked
+only every 1/--quiet-fps seconds; as soon as any detection reaches --wake-conf
+it becomes active and is checked at --active-fps until it has been clear for
+--cooldown seconds. --active-cameras of the simulated cameras show fire images,
+the rest show a few fixed fire-free images each (a near-static scene, like a
+real camera), so a quiet camera that wakes up is a false wake-up. It keeps up
+when quiet cameras are never left longer than 1.5 / --quiet-fps seconds, fire
+cameras get --active-fps checks per second, and p95 latency stays in budget.
+
+    python scripts/multicam_stress.py --weights best.pt --adaptive \
+        --image-folder .../images/test --cameras 10,20,30,40,50,60,70
+
 Plant footage is confidential: on Kaggle or any cloud GPU use public images or
 videos only.
 """
@@ -77,6 +89,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="auto")
     p.add_argument("--no-amp", dest="amp", action="store_false", default=True)
     p.add_argument("--output", default=None, help="Write the results as JSON here.")
+    ad = p.add_argument_group("adaptive check rate")
+    ad.add_argument("--adaptive", action="store_true", help="Quiet / active scheduling instead of round-robin.")
+    ad.add_argument("--quiet-fps", type=float, default=0.5, help="Checks per second for a quiet camera.")
+    ad.add_argument("--active-fps", type=float, default=2.0, help="Checks per second for an active camera.")
+    ad.add_argument("--wake-conf", type=float, default=0.5, help="Detection score that makes a camera active.")
+    ad.add_argument("--cooldown", type=float, default=5.0, help="Seconds without a detection before going quiet.")
+    ad.add_argument("--active-cameras", type=int, default=2, help="Simulated cameras that show fire.")
+    ad.add_argument("--frames-per-quiet-camera", type=int, default=3)
     return p.parse_args()
 
 
@@ -164,6 +184,121 @@ def run_batch(model, device, use_amp, batch, prepared):
     if device.type == "cuda":
         torch.cuda.synchronize()
     return detections
+
+
+def load_adaptive_pools(folder: str, n_quiet: int, per_quiet: int, n_fire: int, size: tuple[int, int]):
+    """Fire-free and fire frames from a YOLO image folder (labels next to images/)."""
+    files = sorted(p for p in Path(folder).rglob("*") if p.suffix.lower() in IMAGE_EXTS)
+    neg, fire = [], []
+    for f in files:
+        lab = Path(str(f.parent).replace("images", "labels")) / (f.stem + ".txt")
+        lines = lab.read_text().split() if lab.exists() else []
+        (fire if lines[:1] and any(v in ("1", "1.0") for v in lines[0::5]) else neg if not lines else []).append(f)
+    rng = np.random.default_rng(0)
+    rng.shuffle(neg)
+    rng.shuffle(fire)
+    need_neg, need_fire = n_quiet * per_quiet, max(n_fire, 1) * 20
+    if len(neg) < need_neg or len(fire) < 20:
+        raise SystemExit(f"need {need_neg} fire-free and 20 fire images, found {len(neg)} and {len(fire)}")
+
+    def load(paths):
+        return [cv2.resize(cv2.imread(str(x)), size, interpolation=cv2.INTER_LINEAR) for x in paths]
+
+    quiet = load(neg[:need_neg])
+    return [quiet[k * per_quiet:(k + 1) * per_quiet] for k in range(n_quiet)], load(fire[:need_fire])
+
+
+def run_count_adaptive(model, device, use_amp, size, n, args, pools):
+    quiet_sets, fire_frames = pools
+    n_fire = min(args.active_cameras, n)
+    transform = model.detector.transform
+    transform.min_size, transform.max_size = (size,), size
+    cams = []
+    for i in range(n):
+        frames = fire_frames[(i * 20) % len(fire_frames):][:20] or fire_frames if i < n_fire else quiet_sets[i - n_fire]
+        cams.append(SimCamera(i, args.camera_fps, size=args.frame_size_wh, frames=frames))
+    for c in cams:
+        c.start()
+    while any(c.latest is None for c in cams):
+        time.sleep(0.01)
+
+    quiet_period, active_period = 1.0 / args.quiet_fps, 1.0 / args.active_fps
+    t0 = time.perf_counter()
+    t_measure, t_end = t0 + args.warmup, t0 + args.warmup + args.duration
+    # stagger quiet cameras so they do not all fall due at once
+    next_due = [t0 + (i / n) * quiet_period for i in range(n)]
+    active = [False] * n
+    last_hit = [-1e9] * n
+    last_check = [None] * n
+    gaps_quiet, latencies, batch_sizes = [], [], []
+    checks = [0] * n
+    false_wakes = set()
+    pending = None
+    pool = ThreadPoolExecutor(max_workers=args.prep_workers)
+    while True:
+        now = time.perf_counter()
+        if now >= t_end:
+            break
+        measuring = now >= t_measure
+        due = sorted((next_due[i], i) for i in range(n) if now >= next_due[i])[:args.max_batch]
+        batch = []
+        for _, i in due:
+            seq, captured, frame = cams[i].latest
+            batch.append((i, (seq, captured, frame)))
+            next_due[i] = now + (active_period if active[i] else quiet_period)
+        if not batch and pending is None:
+            time.sleep(0.002)
+            continue
+        prepared = [pool.submit(prepare, fr, size) for _, (_, _, fr) in batch] if batch else None
+        if pending is not None:
+            dets = run_batch(model, device, use_amp, *pending)
+            done = time.perf_counter()
+            for (i, (_, captured, _)), det in zip(pending[0], dets):
+                hit = bool((det["scores"] >= args.wake_conf).any())
+                if hit:
+                    last_hit[i] = done
+                    if not active[i]:
+                        active[i] = True
+                        next_due[i] = min(next_due[i], done + active_period)
+                        if i >= n_fire and done >= t_measure:
+                            false_wakes.add(i)
+                elif active[i] and done - last_hit[i] > args.cooldown:
+                    active[i] = False
+                if done >= t_measure:
+                    checks[i] += 1
+                    latencies.append((done - captured) * 1000.0)
+                    if last_check[i] is not None and not active[i] and i >= n_fire:
+                        gaps_quiet.append(done - last_check[i])
+                last_check[i] = done
+            if done >= t_measure:
+                batch_sizes.append(len(pending[0]))
+        pending = (batch, prepared) if batch else None
+    pool.shutdown(wait=True)
+    for c in cams:
+        c.running = False
+    for c in cams:
+        c.join(timeout=2)
+
+    lat = np.array(latencies) if latencies else np.array([float("nan")])
+    fire_rate = [checks[i] / args.duration for i in range(n_fire)]
+    quiet_gap_max = max(gaps_quiet) if gaps_quiet else float("nan")
+    result = {
+        "cameras": n,
+        "fire_cameras": n_fire,
+        "total_fps": sum(checks) / args.duration,
+        "fire_cam_fps_min": min(fire_rate) if fire_rate else float("nan"),
+        "quiet_gap_p95_s": float(np.percentile(gaps_quiet, 95)) if gaps_quiet else float("nan"),
+        "quiet_gap_max_s": quiet_gap_max,
+        "false_wakes": len(false_wakes),
+        "latency_p50_ms": float(np.percentile(lat, 50)),
+        "latency_p95_ms": float(np.percentile(lat, 95)),
+        "mean_batch": float(np.mean(batch_sizes)) if batch_sizes else 0.0,
+        "gpu_mem_gb": (torch.cuda.max_memory_allocated() / 1e9) if device.type == "cuda" else 0.0,
+    }
+    result["keeps_up"] = (result["fire_cam_fps_min"] >= 0.9 * args.active_fps
+                          and result["quiet_gap_p95_s"] <= 1.5 * quiet_period
+                          and result["latency_p95_ms"] <= args.max_latency_ms)
+    return result
 
 
 def run_count(model, device, use_amp, size, n, args, frame_sets):
@@ -263,6 +398,14 @@ def main() -> None:
     size = model.config["image_size"]
     counts = [int(v) for v in args.cameras.split(",")]
 
+    if args.adaptive:
+        if not args.image_folder:
+            raise SystemExit("--adaptive needs --image-folder (a YOLO folder with labels)")
+        pools = load_adaptive_pools(args.image_folder, max(counts) - min(args.active_cameras, min(counts)),
+                                    args.frames_per_quiet_camera, args.active_cameras, args.frame_size_wh)
+        run_adaptive(model, device, use_amp, size, counts, args, pools)
+        return
+
     frame_sets = None
     if args.image_folder:
         frame_sets = load_image_frames(args.image_folder, max(counts), args.frames_per_camera, args.frame_size_wh)
@@ -286,6 +429,32 @@ def main() -> None:
     ok = [r["cameras"] for r in results if r["keeps_up"]]
     print(f"\nlargest camera count that keeps up: {max(ok) if ok else 'none'}"
           f"  (bar: {args.min_camera_fps:g} checks per camera per second)")
+    if args.output:
+        Path(args.output).write_text(json.dumps({"args": {k: v for k, v in vars(args).items() if k != "frame_size_wh"},
+                                                 "device": gpu, "image_size": size, "results": results}, indent=2))
+        print("wrote", args.output)
+
+
+def run_adaptive(model, device, use_amp, size, counts, args, pools) -> None:
+    gpu = torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU"
+    print(f"device {gpu} | input {size}px | ADAPTIVE: quiet {args.quiet_fps:g}/s, active {args.active_fps:g}/s, "
+          f"wake at {args.wake_conf:g}, cooldown {args.cooldown:g}s | {args.active_cameras} cameras show fire | "
+          f"{args.duration:g}s per count after {args.warmup:g}s warm-up")
+    print(f"keeps up = fire cameras >= {0.9 * args.active_fps:g} checks/s, quiet cameras checked at least every "
+          f"{1.5 / args.quiet_fps:g}s (p95), p95 latency <= {args.max_latency_ms:g} ms\n")
+    header = (f"{'cams':>4} {'total fps':>9} {'fire cam fps':>12} {'quiet gap p95':>13} {'max':>6} "
+              f"{'false wakes':>11} {'p95 ms':>7} {'batch':>5}  result")
+    print(header + "\n" + "-" * len(header))
+    results = []
+    for n in counts:
+        r = run_count_adaptive(model, device, use_amp, size, n, args, pools)
+        results.append(r)
+        print(f"{n:>4} {r['total_fps']:>9.1f} {r['fire_cam_fps_min']:>12.2f} {r['quiet_gap_p95_s']:>12.1f}s "
+              f"{r['quiet_gap_max_s']:>5.1f}s {r['false_wakes']:>4d} of {n - r['fire_cameras']:<4d} "
+              f"{r['latency_p95_ms']:>7.0f} {r['mean_batch']:>5.1f}  {'KEEPS UP' if r['keeps_up'] else 'FALLS BEHIND'}",
+              flush=True)
+    ok = [r["cameras"] for r in results if r["keeps_up"]]
+    print(f"\nlargest camera count that keeps up: {max(ok) if ok else 'none'}")
     if args.output:
         Path(args.output).write_text(json.dumps({"args": {k: v for k, v in vars(args).items() if k != "frame_size_wh"},
                                                  "device": gpu, "image_size": size, "results": results}, indent=2))
