@@ -903,6 +903,25 @@ Reading:
 - Costs to watch: tiny-smoke AP fell (only 66 boxes, noisy) and the scene head
   fire FPR rose from 1.6% to 2.7%.
 
+**Helmet test** (`scripts/eval_negatives.py`, the 3,500 hard-hat images NOT
+used in training; share of images with any fire/smoke detection):
+
+| conf | Model 6 | Model 7 |
+|---|---|---|
+| 0.50 | 672 (19.2%) | 215 (6.1%) |
+| 0.70 | 254 (7.3%) | 104 (3.0%) |
+| 0.80 | 138 (3.9%) | 57 (1.6%) |
+| 0.85 | 85 (2.4%) | 41 (1.2%) |
+| 0.90 | 46 (1.3%) | 23 (0.7%) |
+| 0.93 | 31 (0.9%) | 13 (0.4%); fire-only 16 -> 3 |
+
+False alarms on helmet scenes halved at the deployment thresholds and fell
+3x at 0.50, with test mAP and small-fire confidence unchanged or better.
+**Model 7 replaces Model 6 as the working model.** Caveat: the held-out
+helmets come from the same dataset as the training helmets, so this is an
+in-distribution result; site helmets (camera height, lighting) still need
+checking on the site footage, locally only.
+
 ## 7. Change log
 
 ### 2026-09-06 — DINOv3 pipeline completed
